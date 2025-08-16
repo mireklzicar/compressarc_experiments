@@ -46,6 +46,8 @@ if __name__ == "__main__":
     # 228f6490, 508bd3b6, 2281f1f4, ecdecbb3
     parser.add_argument('--task_name', type=str, default='272f95fa', help='name of the task to run')
     parser.add_argument('--model_name', type=str, default='compressarc_baseline', help='name of the model to use')
+    parser.add_argument('--use_gumbel_softmax', action='store_true', help='use gumbel softmax for op selection')
+    parser.add_argument('--temperature', type=float, default=1.0, help='gumbel softmax temperature')
     args = parser.parse_args()
     split = args.split
     task_name = args.task_name
@@ -57,7 +59,19 @@ if __name__ == "__main__":
 
     # Preprocess the task, set up the training
     task = preprocessing.preprocess_tasks(split, [task_name])[0]
-    model = arc_compressor.ARCCompressor(task)
+    if model_name == 'differentiable_dsl':
+        # For the differentiable_dsl model, we need to make sure that the ARCCompressor
+        # is prepared to handle the dsl features.
+        # For now, we will just pass the task, and the ARCCompressor will handle the rest.
+        model = arc_compressor.ARCCompressor(
+            task,
+            use_dsl=True,
+            use_gumbel_softmax=args.use_gumbel_softmax,
+            temperature=args.temperature,
+        )
+    else:
+        model = arc_compressor.ARCCompressor(task, use_dsl=False)
+
     optimizer = torch.optim.Adam(model.weights_list, lr=0.01, betas=(0.5, 0.9))
     scaler = torch.amp.GradScaler('cuda')
     train_history_logger = solution_selection.Logger(task)

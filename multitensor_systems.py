@@ -147,6 +147,15 @@ class MultiTensor:
             d = d[dim_val]
         d[dims[-1]] = value
 
+    def data_values(self):
+        """
+        Yields all the non-None tensors in this multitensor.
+        """
+        for dims in self.multitensor_system:
+            val = self[dims]
+            if val is not None:
+                yield val
+
 
 def multify(fn):
     """
