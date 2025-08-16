@@ -56,6 +56,17 @@ def prepare_vitarc_batch(task, tokenizer):
         
         input_texts.append(input_text)
         target_texts.append(output_text)
+
+    # Include test examples for inference/prediction
+    for i in range(task.n_test):
+        input_grid = task.unprocessed_problem['test'][i]['input']
+        # For test examples, we don't have the output, so we use the input as placeholder target
+        # During inference, the model will predict the actual output
+        input_text = arc_grid_to_tokens(np.array(input_grid))
+        target_text = input_text  # Use input as placeholder target for test examples
+        
+        input_texts.append(input_text)
+        target_texts.append(target_text)
     
     if input_texts and target_texts:
         # Tokenize all inputs and targets

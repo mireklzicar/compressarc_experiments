@@ -81,8 +81,8 @@ if __name__ == "__main__":
         optimizer = torch.optim.Adam(model.model.parameters(), lr=0.0001, betas=(0.5, 0.9))
     else:
         n_iterations = 200
-        checkpoint_steps = 50
-        optimizer = torch.optim.Adam(model.model.parameters(), lr=0.01, betas=(0.5, 0.9))
+        checkpoint_steps = 25
+        optimizer = torch.optim.Adam(model.weights_list, lr=0.01, betas=(0.5, 0.9))
     scaler = torch.amp.GradScaler('cuda')
     train_history_logger = solution_selection.Logger(task)
     visualization.plot_problem(train_history_logger)

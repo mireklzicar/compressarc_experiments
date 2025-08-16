@@ -255,7 +255,10 @@ class Logger:
             for test_idx in range(self.task.n_test):
                 # Get tokens for this test example
                 if tokens.dim() == 2:  # [batch, seq_len]
-                    example_tokens = tokens[test_idx] if test_idx < tokens.shape[0] else tokens[0]
+                    # Token sequences now include both training and test data.
+                    # Test examples start after the training examples.
+                    token_idx = self.task.n_train + test_idx
+                    example_tokens = tokens[token_idx] if token_idx < tokens.shape[0] else tokens[0]
                 else:  # [seq_len] - single sequence
                     example_tokens = tokens
                 
@@ -376,11 +379,33 @@ class Logger:
                 for j, val in enumerate(row):
                     padded_grid[i][j] = max(0, min(9, val))
             
-            return padded_grid
+            return self.crop_grid(padded_grid)
             
         except Exception as e:
             print(f"Warning: Error in _text_to_grid: {e}")
             return [[0, 0], [0, 0]]  # Default fallback
+
+    def crop_grid(self, grid, background_color_idx=0):
+        """Crops a grid to remove exterior rows/columns of a specific background color."""
+        if not grid or not grid[0]:
+            return grid
+
+        grid_np = np.array(grid)
+
+        # Find rows that are not all background color
+        non_bg_rows = np.where(np.any(grid_np != background_color_idx, axis=1))[0]
+        if non_bg_rows.size == 0:
+            return [[background_color_idx]]  # Return a single background pixel
+        
+        # Find columns that are not all background color
+        non_bg_cols = np.where(np.any(grid_np != background_color_idx, axis=0))[0]
+        if non_bg_cols.size == 0:
+            return [[background_color_idx]]
+
+        # Crop the grid
+        cropped_grid = grid_np[non_bg_rows[0]:non_bg_rows[-1]+1, non_bg_cols[0]:non_bg_cols[-1]+1]
+        
+        return cropped_grid.tolist()
 
 
 def save_predictions(loggers, fname='predictions.npz'):

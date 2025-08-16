@@ -119,6 +119,9 @@ def tokens_to_grid(tokens, tokenizer):
         # Ensure values are in valid ARC color range (0-9)
         grid_arr = np.clip(grid_arr, 0, 9)
         
+        # Crop the grid to remove exterior rows/columns of background color (0)
+        grid_arr = crop_grid_numpy(grid_arr, background_color_idx=0)
+        
         # Apply ARC color mapping: convert to one-hot then to RGB colors
         colored_grid = (np.arange(10) == grid_arr[..., None]).astype(np.float32)
         colored_grid = convert_color(colored_grid)
@@ -146,6 +149,34 @@ color_list = np.array([
     [135, 216, 241],  # light blue
     [146, 18, 49],  # brown
 ])
+
+def crop_grid_numpy(grid, background_color_idx=0):
+    """Crops a numpy grid to remove exterior rows/columns of a specific background color."""
+    if grid.size == 0:
+        return grid
+
+    # Find rows that are not all background color
+    non_bg_rows = np.where(np.any(grid != background_color_idx, axis=1))[0]
+    
+    # Find columns that are not all background color
+    non_bg_cols = np.where(np.any(grid != background_color_idx, axis=0))[0]
+    
+    # If the grid is all background or very small non-background content, don't crop aggressively
+    if non_bg_rows.size == 0 or non_bg_cols.size == 0:
+        # Return a reasonable sized crop instead of single pixel
+        min_size = min(grid.shape[0], grid.shape[1], 5)  # At most 5x5, at least what we have
+        return grid[:min_size, :min_size]
+    
+    # Add some padding around the content to avoid over-cropping
+    row_start = max(0, non_bg_rows[0] - 1)
+    row_end = min(grid.shape[0], non_bg_rows[-1] + 2)
+    col_start = max(0, non_bg_cols[0] - 1)
+    col_end = min(grid.shape[1], non_bg_cols[-1] + 2)
+    
+    # Crop the grid
+    cropped_grid = grid[row_start:row_end, col_start:col_end]
+    
+    return cropped_grid
 
 def convert_color(grid):  # grid dims must end in c
     return np.clip(np.matmul(grid, color_list), 0, 255).astype(np.uint8)
@@ -235,13 +266,29 @@ def plot_solution(logger, model=None, fname=None):
         # Predicted tokens from logits
         predicted_tokens_current = torch.argmax(logger.current_logits, dim=-1)
         predicted_tokens_ema = torch.argmax(logger.ema_logits, dim=-1)
+        
+        # Create solutions for each test example by converting tokens to grids
+        current_solutions = []
+        ema_solutions = []
+        
+        for test_idx in range(n_test):
+            # The token sequences now include both training and test data.
+            # Test examples start after the training examples.
+            token_idx = n_train + test_idx
+            
+            current_grid = tokens_to_grid(predicted_tokens_current[token_idx], tokenizer)
+            ema_grid = tokens_to_grid(predicted_tokens_ema[token_idx], tokenizer)
+            
+            current_solutions.append(current_grid)
+            ema_solutions.append(ema_grid)
 
         solutions_list = [
-            tokens_to_grid(predicted_tokens_current[0], tokenizer),
-            tokens_to_grid(predicted_tokens_ema[0], tokenizer),
+            current_solutions,  # Now properly structured as array of grids by test example
+            ema_solutions,      # Now properly structured as array of grids by test example
             logger.solution_most_frequent,
             logger.solution_second_most_frequent,
         ]
+        
         masks_list = [None, None, None, None]
     else:
         solutions_list = [
@@ -290,11 +337,27 @@ def plot_solution(logger, model=None, fname=None):
         for solution_num, (solution, masks, label) in enumerate(zip(valid_solutions, valid_masks, valid_labels)):
             if isinstance(model, CompressionViTARC):
                 if 'guess' in label:
-                    # Top-k solutions are not yet colored, so we need to convert them
-                    grid = (np.arange(10)==np.array(solution)[subsplit_example_num][:,:,None]).astype(np.float32)
+                    # Guess solutions already contain actual color values from task.colors
+                    # We need to convert them back to indices and then to RGB colors
+                    solution_grid = solution[subsplit_example_num]  # tuple of tuples (rows of color values)
+                    
+                    # Convert to numpy array
+                    grid_array = np.array(solution_grid)
+                    
+                    # Map color values back to indices (0-9) for visualization
+                    color_to_index = {color: idx for idx, color in enumerate(logger.task.colors)}
+                    index_grid = np.zeros_like(grid_array, dtype=int)
+                    
+                    for i in range(grid_array.shape[0]):
+                        for j in range(grid_array.shape[1]):
+                            color_val = grid_array[i, j]
+                            index_grid[i, j] = color_to_index.get(color_val, 0)  # Default to 0 if not found
+                    
+                    # Convert to one-hot encoding then to RGB colors
+                    grid = (np.arange(10) == index_grid[..., None]).astype(np.float32)
                     grid = convert_color(grid)
                 else:
-                    grid = solution
+                    grid = solution[subsplit_example_num]  # Now properly indexed by test example
                     
                 # Ensure grid fits within visualization bounds for CompressionViTARC
                 max_grid_x = 2 * n_x
@@ -336,6 +399,7 @@ def plot_solution(logger, model=None, fname=None):
     for subsplit_example_num in range(n_test):
         for solution_num in range(n_plotted_solutions):
             subsplit = 'test'
+            # Now all solutions are properly structured as arrays indexed by test example
             grid = np.array(valid_solutions[solution_num][subsplit_example_num])  # x, y
             shape = shapes[subsplit_example_num][solution_num]
             for xline in range(shape[0]+1):
