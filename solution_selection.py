@@ -43,11 +43,11 @@ class Logger:
             self.KL_curves = {KL_name: [] for KL_name in KL_names}
 
         for KL_amount, KL_name in zip(KL_amounts, KL_names):
-            self.KL_curves[KL_name].append(float(KL_amount.detach().sum().cpu().numpy()))
+            self.KL_curves[KL_name].append(float(KL_amount.detach().sum().cpu().to(torch.float32).numpy()))
 
-        self.total_KL_curve.append(float(total_KL.detach().cpu().numpy()))
-        self.reconstruction_error_curve.append(float(reconstruction_error.detach().cpu().numpy()))
-        self.loss_curve.append(float(loss.detach().cpu().numpy()))
+        self.total_KL_curve.append(float(total_KL.detach().cpu().to(torch.float32).numpy()))
+        self.reconstruction_error_curve.append(float(reconstruction_error.detach().cpu().to(torch.float32).numpy()))
+        self.loss_curve.append(float(loss.detach().cpu().to(torch.float32).numpy()))
 
         self._track_solution(train_step, logits.detach(), x_mask.detach(), y_mask.detach())
 
@@ -150,13 +150,13 @@ class Logger:
                                                y_mask[example_num],
                                                y_length)  # x, y
 
-            solution_slices.append(solution_slice.cpu().numpy().tolist())
-            uncertainty_values.append(float(np.mean(uncertainty_slice.cpu().numpy())))
+            solution_slices.append(solution_slice.cpu().to(torch.float32).numpy().tolist())
+            uncertainty_values.append(float(np.mean(uncertainty_slice.cpu().to(torch.float32).numpy())))
 
         for example in solution_slices:
             for row in example:
                 for i, val in enumerate(row):
-                    row[i] = self.task.colors[val]
+                    row[i] = self.task.colors[int(val)]
 
         solution_slices = tuple(tuple(tuple(row) for row in example) for example in solution_slices)
         return solution_slices, np.mean(uncertainty_values)

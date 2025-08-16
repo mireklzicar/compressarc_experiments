@@ -104,9 +104,6 @@ def take_step(task, model, optimizer, train_step, train_history_logger):
             reconstruction_error = reconstruction_error - logprob
 
     loss = total_KL + 10*reconstruction_error
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
 
     # Performance recording
     train_history_logger.log(train_step,
@@ -118,6 +115,7 @@ def take_step(task, model, optimizer, train_step, train_history_logger):
                              total_KL,
                              reconstruction_error,
                              loss)
+    return loss
 
 
 if __name__ == "__main__":

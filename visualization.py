@@ -108,8 +108,8 @@ def plot_solution(logger, fname=None):
 
     # Four plotted solutions
     solutions_list = [
-            torch.softmax(logger.current_logits, dim=1).cpu().numpy(),
-            torch.softmax(logger.ema_logits, dim=1).cpu().numpy(),
+            torch.softmax(logger.current_logits, dim=1).cpu().to(torch.float32).numpy(),
+            torch.softmax(logger.ema_logits, dim=1).cpu().to(torch.float32).numpy(),
             logger.solution_most_frequent,
             logger.solution_second_most_frequent,
             ]

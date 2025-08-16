@@ -87,8 +87,8 @@ def channel_layer(target_capacity, posterior):
         dimensionality *= axis_length
     min_capacity = 0.5
     init_capacity = 10000
-    min_capacity = torch.tensor(min_capacity)
-    init_capacity = torch.tensor(init_capacity)
+    min_capacity = torch.tensor(min_capacity, device=target_capacity.device)
+    init_capacity = torch.tensor(init_capacity, device=target_capacity.device)
 
     target_capacity = 10*target_capacity  # this reparameterization is for faster learning
 
@@ -121,7 +121,7 @@ def channel_layer(target_capacity, posterior):
     normalized_mean = normalized_mean / torch.sqrt(torch.mean(normalized_mean**2+1e-8, dim=all_but_last_dim))
 
     # Now we can have a sample of z.
-    z = signal_std*normalized_mean + noise_std*torch.randn(normalized_mean.shape)
+    z = signal_std*normalized_mean + noise_std*torch.randn(normalized_mean.shape, device=normalized_mean.device)
     z = output_scaling*z  # leaks a tiny bit of unmeasured information, see comment above
 
     # Calculate the KL directly instead of using the AWGN channel capacity formula, because we didn't
