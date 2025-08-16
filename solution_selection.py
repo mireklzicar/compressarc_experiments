@@ -39,23 +39,61 @@ class Logger:
 
     def log(self, train_step, logits, x_mask, y_mask, KL_amounts, KL_names, total_KL, reconstruction_error, loss):
         """Logs training progress and tracks solutions from one forward pass."""
-        if train_step == 0:
-            self.KL_curves = {KL_name: [] for KL_name in KL_names}
+        if KL_amounts is not None and KL_names is not None:
+            if train_step == 0:
+                self.KL_curves = {KL_name: [] for KL_name in KL_names}
 
-        for KL_amount, KL_name in zip(KL_amounts, KL_names):
-            self.KL_curves[KL_name].append(float(KL_amount.detach().sum().cpu().to(torch.float32).numpy()))
+            for KL_amount, KL_name in zip(KL_amounts, KL_names):
+                self.KL_curves[KL_name].append(float(KL_amount.detach().sum().cpu().to(torch.float32).numpy()))
 
-        self.total_KL_curve.append(float(total_KL.detach().cpu().to(torch.float32).numpy()))
-        self.reconstruction_error_curve.append(float(reconstruction_error.detach().cpu().to(torch.float32).numpy()))
+            self.total_KL_curve.append(float(total_KL.detach().cpu().to(torch.float32).numpy()))
+        
+        if isinstance(reconstruction_error, torch.Tensor):
+            self.reconstruction_error_curve.append(float(reconstruction_error.detach().cpu().to(torch.float32).numpy()))
+        else:
+            self.reconstruction_error_curve.append(reconstruction_error)
         self.loss_curve.append(float(loss.detach().cpu().to(torch.float32).numpy()))
 
-        self._track_solution(train_step, logits.detach(), x_mask.detach(), y_mask.detach())
+        self._track_solution(
+            train_step,
+            logits.detach() if logits is not None else None,
+            x_mask.detach() if x_mask is not None else None,
+            y_mask.detach() if y_mask is not None else None
+        )
 
     def _track_solution(self, train_step, logits, x_mask, y_mask):
         """Postprocess and score solutions and keep track of the top two solutions with highest scores."""
-        self.current_logits = logits[self.task.n_train:, :, :, :, 1]  # example, color, x, y
-        self.current_x_mask = x_mask[self.task.n_train:, :, 1]  # example, x
-        self.current_y_mask = y_mask[self.task.n_train:, :, 1]  # example, y
+        
+        
+        
+        # Check if we have None masks (indicating token-based model)
+        if x_mask is None or y_mask is None:
+            # For token-based models, store the logits directly for visualization
+            if logits is not None:
+                self.current_logits = logits
+                # Use exponential moving average for token logits as well
+                if not hasattr(self, '_token_ema_initialized'):
+                    self.ema_logits = logits.clone()
+                    self._token_ema_initialized = True
+                else:
+                    self.ema_logits = self.ema_decay * self.ema_logits + (1 - self.ema_decay) * logits
+            return
+        
+        if logits is not None:
+            if logits.dim() == 5 and logits.shape[-1] > 1:
+                self.current_logits = logits[self.task.n_train:, :, :, :, 1]  # example, color, x, y
+            else:
+                self.current_logits = logits[self.task.n_train:]
+        if x_mask is not None:
+            if x_mask.dim() == 3 and x_mask.shape[-1] > 1:
+                self.current_x_mask = x_mask[self.task.n_train:, :, 1]  # example, x
+            else:
+                self.current_x_mask = x_mask[self.task.n_train:]
+        if y_mask is not None:
+            if y_mask.dim() == 3 and y_mask.shape[-1] > 1:
+                self.current_y_mask = y_mask[self.task.n_train:, :, 1]  # example, y
+            else:
+                self.current_y_mask = y_mask[self.task.n_train:]
 
         self.ema_logits = self.ema_decay * self.ema_logits + (1 - self.ema_decay) * self.current_logits
         self.ema_x_mask = self.ema_decay * self.ema_x_mask + (1 - self.ema_decay) * self.current_x_mask

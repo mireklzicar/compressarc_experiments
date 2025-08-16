@@ -16,6 +16,7 @@ import multitensor_systems
 import layers
 import solution_selection
 import visualization
+from compression_vitarc import CompressionViTARC
 
 
 """
@@ -69,16 +70,23 @@ if __name__ == "__main__":
             use_gumbel_softmax=args.use_gumbel_softmax,
             temperature=args.temperature,
         )
+    elif model_name == 'compression_vitarc':
+        model = CompressionViTARC(task)
     else:
         model = arc_compressor.ARCCompressor(task, use_dsl=False)
 
-    optimizer = torch.optim.Adam(model.weights_list, lr=0.01, betas=(0.5, 0.9))
+    if model_name == 'compression_vitarc':
+        n_iterations = 10000
+        checkpoint_steps = 250
+        optimizer = torch.optim.Adam(model.model.parameters(), lr=0.0001, betas=(0.5, 0.9))
+    else:
+        n_iterations = 200
+        checkpoint_steps = 50
+        optimizer = torch.optim.Adam(model.model.parameters(), lr=0.01, betas=(0.5, 0.9))
     scaler = torch.amp.GradScaler('cuda')
     train_history_logger = solution_selection.Logger(task)
     visualization.plot_problem(train_history_logger)
 
-    # Perform training for 200 iterations
-    n_iterations = 200
     for train_step in tqdm(range(n_iterations)):
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             loss = train.take_step(task, model, optimizer, train_step, train_history_logger)
@@ -86,10 +94,11 @@ if __name__ == "__main__":
         scaler.step(optimizer)
         scaler.update()
         
-        # Plot solutions and save metrics every 50 steps
-        if (train_step+1) % 50 == 0:
+        # Plot solutions and save metrics every checkpoint_steps steps
+        if (train_step+1) % checkpoint_steps == 0:
             # Save model
-            torch.save(model.weights_list, folder + f'model.pt')
+            if hasattr(model, 'weights_list'):
+                torch.save(model.weights_list, folder + f'model.pt')
 
             # Save metrics
             metrics_path = folder + 'metrics.csv'
@@ -113,9 +122,9 @@ if __name__ == "__main__":
                     row.append(kl_curve[-1])
                 writer.writerow(row)
 
-            visualization.plot_solution(train_history_logger,
+            visualization.plot_solution(train_history_logger, model,
                 fname=folder + task_name + '_at_' + str(train_step+1) + ' steps.png')
-            visualization.plot_solution(train_history_logger,
+            visualization.plot_solution(train_history_logger, model,
                 fname=folder + task_name + '_at_' + str(train_step+1) + ' steps.pdf')
     
     torch.cuda.empty_cache()
