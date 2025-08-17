@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from compression_vitarc import CompressionViTARC
+from models.vit_arc.vitarc_with_gumbel import ViTARCWithGumbel
 from tokenization.arc_tokenizer import get_or_build_arc_tokenizer
 
 
@@ -260,7 +261,7 @@ def plot_solution(logger, model=None, fname=None):
     n_y = logger.task.n_y
 
     # Four plotted solutions
-    if isinstance(model, CompressionViTARC):
+    if isinstance(model, (CompressionViTARC, ViTARCWithGumbel)):
         tokenizer = get_or_build_arc_tokenizer()
         
         # Predicted tokens from logits
@@ -335,7 +336,7 @@ def plot_solution(logger, model=None, fname=None):
         shapes.append([])
 
         for solution_num, (solution, masks, label) in enumerate(zip(valid_solutions, valid_masks, valid_labels)):
-            if isinstance(model, CompressionViTARC):
+            if isinstance(model, (CompressionViTARC, ViTARCWithGumbel)):
                 if 'guess' in label:
                     # Guess solutions already contain actual color values from task.colors
                     # We need to convert them back to indices and then to RGB colors
