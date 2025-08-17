@@ -21,3 +21,11 @@ class CompressionViTARC:
             labels=labels
         )
         return outputs.loss, outputs.logits
+    
+    def state_dict(self):
+        """Expose the underlying model's state_dict for saving."""
+        return self.model.state_dict()
+    
+    def load_state_dict(self, state_dict):
+        """Load state dict into the underlying model."""
+        return self.model.load_state_dict(state_dict)
