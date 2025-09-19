@@ -1,0 +1,2648 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: dataset, results_for_the_blog_post, visualization.py
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+analyze_example.py
+arc_compressor.py
+initializers.py
+layers.py
+multitensor_systems.py
+parallel_train.py
+plot_accuracy.py
+plot_problems.py
+preprocessing.py
+README.md
+requirements.txt
+scoring.py
+solution_selection.py
+solve_task.py
+train.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="multitensor_systems.py">
+import numpy as np
+import torch
+
+
+np.random.seed(0)
+torch.manual_seed(0)
+
+
+NUM_DIMENSIONS = 5  # We have 5 dimensions: examples, colors, directions, x, y
+
+class MultiTensorSystem:
+    """
+    A system for handling multi-dimensional configurations of 'examples',
+    'colors', 'directions', and (x, y) positions. This class can generate
+    and iterate through valid dimension combinations.
+    """
+    def __init__(self, n_examples, n_colors, n_x, n_y, task):
+        """
+        Args:
+            n_examples (int): Number of examples.
+            n_colors (int): Number of colors.
+            n_x (int): Size of the X dimension.
+            n_y (int): Size of the Y dimension.
+            task: ARC task that the multitensor system is xreated for
+        """
+        self.n_examples = n_examples
+        self.n_colors = n_colors
+        self.n_directions = 8
+        self.n_x = n_x
+        self.n_y = n_y
+        self.task = task
+        self.dim_lengths = [self.n_examples, self.n_colors,
+                            self.n_directions, self.n_x, self.n_y]
+    def dims_valid(self, dims):
+        """
+        Checks whether a given dimension combination is valid.
+        Validity rules:
+        1. If any of x/y is set (dims[3] or dims[4]), then examples (dims[0]) must also be set.
+        2. Sum of dims[1:] cannot be zero (i.e., at least color, direction, or x/y must be set).
+        Args:
+            dims (list[int]): A list of 0/1 flags indicating which dimensions are included.
+        Returns:
+            bool: Whether the dimension combination is valid.
+        """
+        # If x or y is set, then examples must also be set.
+        if (dims[3] or dims[4]) and not dims[0]:
+            return False
+        # At least one of [color, direction, x, y] must be set.
+        if sum(dims[1:]) == 0:
+            return False
+        return True
+
+    def shape(self, dims, extra_dim=None):
+        """
+        Creates a shape tuple for PyTorch or NumPy based on which dimensions are used.
+        Args:
+            dims (list[int]): A list of 0/1 flags for each dimension.
+            extra_dim (int, optional): An additional dimension to be appended at the end.
+        Returns:
+            list[int]: The computed shape.
+        """
+        shape = []
+        for dim_index, length in enumerate(self.dim_lengths):
+            if dims[dim_index]:
+                shape.append(length)
+        if extra_dim is not None:
+            shape.append(extra_dim)
+        return shape
+
+    def _generate_dims_combinations(self):
+        """Generate all possible 5-bit dimension combinations (from 0..31)."""
+        for i in range(2 ** NUM_DIMENSIONS):
+            # For each of the 5 bits in i, compute dims array
+            dims = [(i >> bit) & 1 for bit in range(NUM_DIMENSIONS)]
+            yield dims
+
+    def __iter__(self):
+        """
+        Yields valid dims.
+        """
+        for dims in self._generate_dims_combinations():
+            if self.dims_valid(dims):
+                yield dims
+
+    def _make_multitensor(self, default, index):
+        """
+        Recursively creates a nested list (tree-like) of shape [2 x 2 x 2 x 2 x 2]
+        (depth = NUM_DIMENSIONS) if `index < NUM_DIMENSIONS`.
+        Once index == NUM_DIMENSIONS, returns `default`.
+        Args:
+            default (Any): The value to return at the leaf of the recursion.
+            index (int): Current depth.
+        Returns:
+            list or default: A nested list structure or the default object if at depth.
+        """
+        if index == NUM_DIMENSIONS:
+            return default
+        return [self._make_multitensor(default, index+1) for _ in range(2)]
+
+    def make_multitensor(self, default=None):
+        """
+        Create a multitensor with a default object to place at every index.
+        Args:
+            default (Any): The default value to place at all leaves. Default: None
+        Returns:
+            MultiTensor: A multitensor with the default object at every index.
+        """
+        return MultiTensor(self._make_multitensor(default, 0), self)
+
+
+class MultiTensor:
+    """
+    Wrapper for a nested data structure that can be indexed by a 5-element dims array.
+    """
+
+    def __init__(self, data, multitensor_system):
+        """
+        Args:
+            data (nested list): The nested list holding the actual data.
+            multitensor_system (MultiTensorSystem): The system this MultiTensor belongs to.
+        """
+        self.data = data
+        self.multitensor_system = multitensor_system
+
+    def __getitem__(self, dims):
+        """
+        Retrieve the data at a specific 5-dimensional index.
+        Args:
+            dims (list[int]): 5-element array (0 or 1) indicating path in nested lists.
+        Returns:
+            Any: The data stored at that nested location.
+        """
+        d = self.data
+        for dim_val in dims:
+            d = d[dim_val]
+        return d
+
+    def __setitem__(self, dims, value):
+        """
+        Set the data at a specific 5-dimensional index.
+        Args:
+            dims (list[int]): 5-element array (0 or 1) indicating path in nested lists.
+            value (Any): The value to store.
+        """
+        d = self.data
+        for dim_val in dims[:-1]:
+            d = d[dim_val]
+        d[dims[-1]] = value
+
+
+def multify(fn):
+    """
+    Decorator that applies a function to all valid dimension combinations
+    if any arguments are MultiTensor instances.
+    """
+
+    def wrapper(*args, **kwargs):
+
+        # Check if we should perform multi-mode or not
+        multitensor_system = None
+        multi_mode = False
+
+        # Identify if any arg or kwarg is a MultiTensor
+        for arg in args:
+            if isinstance(arg, MultiTensor):
+                multi_mode = True
+                multitensor_system = arg.multitensor_system
+        if not multi_mode:
+            for value in kwargs.values():
+                if isinstance(value, MultiTensor):
+                    multi_mode = True
+                    multitensor_system = value.multitensor_system
+                    break
+
+        # If none of the args/kwargs are MultiTensor, just call the function directly
+        if not multi_mode:
+            return fn(None, *args, **kwargs)
+
+        # We do have MultiTensor arguments, so let's build a new MultiTensor result
+        # of the same shape and fill it by iterating over valid dimension combos.
+        def iterate_and_assign(multitensor_system, result_data):
+            """Helper to iterate over dims and assign function outputs."""
+
+            for dims in multitensor_system:
+                # Build per-dims argument list
+                new_args = []
+                for arg in args:
+                    if isinstance(arg, MultiTensor):
+                        new_args.append(arg[dims])
+                    else:
+                        new_args.append(arg)
+                # Build per-dims kwargs
+                new_kwargs = {}
+                for key, value in kwargs.items():
+                    if isinstance(value, MultiTensor):
+                        new_kwargs[key] = value[dims]
+                    else:
+                        new_kwargs[key] = value
+                # Call the user function on these "scalar" values
+                output = fn(dims, *new_args, **new_kwargs)
+                # Assign back to the result MultiTensor
+                # This goes step by step into result_data
+                result_data[dims] = output
+
+        # Create an empty nested list structure
+        result_data = multitensor_system.make_multitensor()
+        iterate_and_assign(multitensor_system, result_data)
+
+        # Return a MultiTensor wrapping the nested result
+        return result_data
+
+    return wrapper
+</file>
+
+<file path="parallel_train.py">
+"""
+This script solves as many puzzles as possible at the same time, trying to saturate your GPU(s). First,
+it measures the amount of memory that each puzzle takes to solve, and then it schedules the puzzles in
+a way that saturates your GPU memory. It does this by running a "server" in parallelize_runs() that
+tracks each GPU's usage and greedily schedules jobs on the GPUs to fit under each GPU's budget.
+"""
+
+# We run 2 steps of every puzzle to determine how much memory each puzzle uses.
+# We run 2000 steps per task at optimal puzzle parallelization under memory constraint.
+# We have changed layers.direction_share() to make it run faster, and got something like a 5-10% speedup.
+
+import os
+import sys
+import time
+import json
+import importlib
+import multiprocessing
+from multiprocessing import Pool
+
+import numpy as np
+import torch
+
+import preprocessing
+import train
+import arc_compressor
+import initializers
+import multitensor_systems
+import layers
+import solution_selection
+import visualization
+import solve_task
+
+# Getting all the task names, setting defaults and constants
+multiprocessing.set_start_method('spawn', force=True)
+torch.set_default_dtype(torch.float32)
+torch.set_default_device('cuda')
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+
+# Function that can spawn processes thata solve a puzzle, and schedule them on GPUs to take up each GPUs quota
+# "quota/usage" here is just a number per puzzle/GPU given to the function. It can be memory, or job count, or
+# anything.
+def parallelize_runs(gpu_quotas, task_usages, n_iterations, verbose=False):
+    """
+    Runs a server that spawns processes to solve many ARC-AGI tasks in parallel.
+    Args:
+        gpu_quotas (list[float]): The max quota that each GPU has to use.
+        task_usages (list[float]): The amount of quota that each task uses.
+        n_iterations (int): The number of training iterations to use to solve each puzzle.
+        verbose (bool): Whether or not to print tqdm bars to show progress.
+    Returns:
+        Dict[str, int]: The max memory allocated for every puzzle.
+        Dict[str, list[Dict[str, list[list[int]]]]]: The guessed solution for every puzzle.
+        float: The amount of time taken to solve all the puzzles in parallel.
+    """
+    t = time.time()
+    gpu_quotas = gpu_quotas[:]
+    tasks_started = [False for i in range(n_tasks)]
+    tasks_finished = [False for i in range(n_tasks)]
+    processes = [None for i in range(n_tasks)]
+    process_gpu_ids = [None for i in range(n_tasks)]
+
+    with multiprocessing.Manager() as manager:
+
+        # Construct structures for inter-process communication
+        memory_dict = manager.dict()
+        solutions_dict = manager.dict()
+        error_queue = manager.Queue()
+
+        # Job monitoring loop
+        while not all(tasks_finished):
+
+            # Scan for errors
+            if not error_queue.empty():
+                raise ValueError(error_queue.get())
+
+            # If a job finishes, release its quota
+            for i in range(n_tasks):
+                if tasks_started[i] and not tasks_finished[i]:
+                    processes[i].join(timeout=0)
+                    if not processes[i].is_alive():
+                        tasks_finished[i] = True
+                        gpu_quotas[process_gpu_ids[i]] += task_usages[i]
+                        if verbose:
+                            print(task_names[i], 'finished on gpu', process_gpu_ids[i],
+                                  'New quota is', gpu_quotas[process_gpu_ids[i]])
+            
+            # If there is enough quota to start a new job, do it
+            for gpu_id in range(n_gpus):
+                for i in range(n_tasks):
+                    enough_quota = gpu_quotas[gpu_id] >= task_usages[i]
+                    enough_cpus = sum(map(int, tasks_started)) - sum(map(int, tasks_finished)) < n_cpus
+                    if not tasks_started[i] and enough_quota and enough_cpus:
+                        gpu_quotas[gpu_id] -= task_usages[i]
+                        args = (task_names[i], split, 1e20, n_iterations, gpu_id, memory_dict, solutions_dict, error_queue)
+                        p = multiprocessing.Process(target=solve_task.solve_task, args=args)
+                        p.start()
+                        processes[i] = p
+                        tasks_started[i] = True
+                        process_gpu_ids[i] = gpu_id
+                        if verbose:
+                            print(task_names[i], 'started on gpu', process_gpu_ids[i],
+                                  'New quota is', gpu_quotas[process_gpu_ids[i]])
+            time.sleep(1)
+
+        # Scan for errors
+        if not error_queue.empty():
+            raise ValueError(error_queue.get())
+
+        # Save the solutions in the server process
+        memory_dict = dict(memory_dict)
+        solutions_dict = dict(solutions_dict)
+
+    time_taken = time.time() - t
+    if verbose:
+        print('All jobs finished in', time_taken, 'seconds.')
+    return memory_dict, solutions_dict, time_taken
+
+
+if __name__ == '__main__':
+    start_time = time.time()
+
+    n_cpus = multiprocessing.cpu_count()
+    n_gpus = torch.cuda.device_count()
+
+    # Find all the puzzle names
+    split = "training"
+    with open(f'dataset/arc-agi_{split}_challenges.json', 'r') as f:
+        problems = json.load(f)
+    task_names = list(problems.keys())
+    del problems
+    n_tasks = len(task_names)
+
+    # Measuring the amount of memory used for every task
+    gpu_memory_quotas = [torch.cuda.mem_get_info(i)[0] for i in range(n_gpus)]
+
+    gpu_task_quotas = [int(gpu_memory_quota // (4 * 1024**3)) for gpu_memory_quota in gpu_memory_quotas]
+    task_usages = [1 for i in range(n_tasks)]
+    memory_dict, _, _ = parallelize_runs(gpu_task_quotas, task_usages, 2, verbose=True)
+
+    # Sort the tasks by decreasing memory usage
+    tasks = sorted(memory_dict.items(), key=lambda x: x[1], reverse=True)
+    task_names, task_memory_usages = zip(*tasks)
+
+    # Computing the solution for every task, while saturating memory
+    n_steps = 2000
+    safe_gpu_memory_quotas = [memory_quota - 4 * 1024**3 for memory_quota in gpu_memory_quotas]
+    _, solutions_dict, time_taken = parallelize_runs(safe_gpu_memory_quotas, task_memory_usages, n_steps, verbose=True)
+
+    # Format the solutions and put into submission file
+    with open('submission.json', 'w') as f:
+        json.dump(solutions_dict, f, indent=4)
+
+    with open("submission.json", "r") as f:
+        contents = json.load(f)
+    print(len(contents.keys()), 'puzzles solved.')
+    print(n_steps, 'steps per puzzle.')
+    print(time_taken, 'seconds.')
+</file>
+
+<file path="plot_accuracy.py">
+import json
+import bisect
+
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+
+import preprocessing
+
+
+"""
+This code computes the pass@n accuracy over all the tasks over time.
+"""
+
+
+class ValueSortedDict:
+    """
+    A value-sorted dict that supports:
+     - insertion/removal
+     - indexing by key
+     - indexing by rank of value
+     - figuring out the rank of a key
+    """
+
+    def __init__(self):
+        self.sorted_list = []
+        self.key_to_value = {}
+
+    def insert(self, key, value):
+        """
+        Insert a key, value pair into the data structure.
+        """
+        if key in self.key_to_value:
+            self.remove(key)
+        
+        # Use bisect to maintain order by value
+        bisect.insort(self.sorted_list, (value, key))
+        self.key_to_value[key] = value
+
+    def get(self, key, default=0):
+        """
+        Index by key.
+        """
+        if key in self.key_to_value:
+            return self.key_to_value.get(key)
+        return default
+
+    def remove(self, key):
+        """
+        Remove by key.
+        """
+        if key in self.key_to_value:
+            value = self.key_to_value.pop(key)
+            index = bisect.bisect_left(self.sorted_list, (value, key))
+            if index < len(self.sorted_list) and self.sorted_list[index] == (value, key):
+                self.sorted_list.pop(index)
+
+    def items(self):
+        """
+        Get the key/value pairs sorted by value.
+        """
+        return [(key, value) for value, key in self.sorted_list]
+
+    def get_by_index(self, index):
+        """
+        Get the key/value pair for the nth ranked value.
+        """
+        if -len(self.sorted_list) <= index < len(self.sorted_list):
+            value, key = self.sorted_list[index]
+            return key, value
+        raise IndexError("Index out of range")
+
+    def find_key(self, key):
+        """
+        Figure out the value rank from a given key.
+        """
+        if key not in self.key_to_value:
+            return -1
+        sorted_keys = [key for value, key in self.sorted_list]
+        return sorted_keys.index(key)
+
+def get_accuracy(true_solution_hashes, fname='predictions.npz'):
+    """
+    Compute the pass@n accuracy over time, of a training run whose
+    solution history is stored in a file outputted by train.py.
+    Args:
+        true_solution_hashes (list[int]): The hashes of the ground truth solutions.
+        fname (str): The train.py output file that has the solution history.
+    Returns:
+        Tensor: A (iteration, pass@n) tensor that gives the accuracy at any iteration
+                for any number of attempts.
+    """
+
+    stored_data = np.load(fname, allow_pickle=True)
+    solution_contribution_logs = stored_data['solution_contribution_logs']
+    solution_picks_histories = stored_data['solution_picks_histories']
+
+    n_tasks = len(solution_contribution_logs)
+    n_iterations = len(solution_contribution_logs[0])
+    n_attempts = n_iterations
+
+    print("Plotting accuracy for " + str(n_tasks) + " tasks.")
+
+    # First mark the number of attempts required to solve a task at every iteration.
+    # Accumulate markings for all tasks.
+    pass_at_n = np.zeros([n_iterations, n_attempts])
+    for task_num in range(n_tasks):
+        true_hash = true_solution_hashes[task_num] >> 16
+        solution_scores = ValueSortedDict()
+        for iteration_num in range(n_iterations):
+            for i in range(2):
+                hashed, score = solution_contribution_logs[task_num][iteration_num][i]
+                hashed = int(hashed) >> 16
+                original_score = torch.tensor(solution_scores.get(hashed, default=-10000))
+                score = torch.tensor(score)
+                new_score = float(torch.logaddexp(score, original_score))
+                solution_scores.insert(hashed, new_score)
+            solution_index = solution_scores.find_key(true_hash)
+            if solution_index != -1:
+                solution_index = len(solution_scores.sorted_list)-1-solution_index
+                if solution_index < n_attempts:
+                    pass_at_n[iteration_num,solution_index] += 1
+
+    # If solved at attempt n, then also solved at attempt m for all m>n.
+    pass_at_n = np.cumsum(pass_at_n, axis=1)  # iteration, @n
+
+    # Divide by number of tasks
+    pass_at_n = pass_at_n / n_tasks
+    return pass_at_n
+
+def plot_accuracy(pass_at_n):
+    """
+    Plot the accuracy curve, for pass@n for n from {1, 2, 5, 10, 100, 1000, 2000}.
+    Args:
+        pass_at_n (Tensor): A (iteration, pass@n) tensor that gives the accuracy
+                at any iteration for any number of attempts.
+    """
+    n_iterations, n_attempts = pass_at_n.shape
+
+    fig, ax = plt.subplots()
+
+    ax.plot(np.arange(n_iterations), pass_at_n[:,0], 'r-', label='pass@1')
+    ax.plot(np.arange(n_iterations), pass_at_n[:,1], 'k-', label='pass@2')
+    ax.plot(np.arange(n_iterations), pass_at_n[:,4], 'g-', label='pass@5')
+    ax.plot(np.arange(n_iterations), pass_at_n[:,9], 'b-', label='pass@10')
+    ax.plot(np.arange(n_iterations), pass_at_n[:,99], 'c-', label='pass@100')
+    ax.plot(np.arange(n_iterations), pass_at_n[:,999], 'm-', label='pass@1000')
+    ax.plot(np.arange(n_iterations), pass_at_n[:,1999], 'y-', label='pass@2000')
+
+    ax.legend()
+    
+    plt.xlabel("step")
+    plt.ylabel("accuracy")
+    ax.grid(which='both', color='0.65', linewidth=0.8, linestyle='-')
+    
+    plt.savefig('accuracy_curve_at_n.png', bbox_inches='tight')
+    plt.close()
+
+def print_accuracy(pass_at_n):
+    """
+    Print the accuracy@n for various training iterations for various values of n.
+    Args:
+        pass_at_n (Tensor): A (iteration, pass@n) tensor that gives the accuracy
+                at any iteration for any number of attempts.
+    """
+    n_iterations, n_attempts = pass_at_n.shape
+    for iter_num in [100, 200, 300, 400, 500, 750, 1000, 1250, 1500, 2000]:
+        for attempt_num in [1, 2, 5, 10, 100, 1000]:
+            print('iteration ' + str(iter_num) + ', ' + str(attempt_num) + ' attempts: accuracy = ' + str(float(pass_at_n[iter_num-1, attempt_num-1])))
+
+if __name__ == "__main__":
+    task_nums = list(range(400))
+    split = input('Enter which split you want to find the task in (training, evaluation, test): ')
+    tasks = preprocessing.preprocess_tasks(split, task_nums)
+    true_solution_hashes = [task.solution_hash for task in tasks]
+    pass_at_n = get_accuracy(true_solution_hashes, fname='predictions.npz')
+    plot_accuracy(pass_at_n)
+    print_accuracy(pass_at_n)
+</file>
+
+<file path="plot_problems.py">
+import numpy as np
+import torch
+
+import preprocessing
+import arc_compressor
+import initializers
+import multitensor_systems
+import layers
+import solution_selection
+import visualization
+
+"""
+Plot all of the ARC-AGI problems in the split.
+"""
+
+
+if __name__ == "__main__":
+    task_nums = list(range(400))
+    split = input('Enter which split you want to find the task in (training, evaluation, test): ')
+    tasks = preprocessing.preprocess_tasks(split, task_nums)
+    train_history_loggers = []
+    for task in tasks:
+        train_history_logger = solution_selection.Logger(task)
+        visualization.plot_problem(train_history_logger)
+</file>
+
+<file path="requirements.txt">
+matplotlib==3.10.0
+numpy==2.2.2
+torch==2.5.1
+tqdm==4.66.6
+</file>
+
+<file path="scoring.py">
+import json
+from typing import Tuple
+import argparse
+import sys
+
+def score_submission(submission_file_name, solutions_file_name, include_task_scores=False) -> dict:
+    """
+    Score a submission against ground truth solutions.
+
+    Args:
+        submission_file_name (str): The file name of the submission file.
+        solutions_file_name (str): The file name of the ground truth solutions.
+        include_task_scores (bool, optional): Whether to include individual task scores. Defaults to False.
+
+    Returns:
+        dict: A dictionary containing the total score, total tasks scored, and optionally individual task scores.
+
+    Reads a submission from file, scores it against the solutions, and returns the score.
+    """
+    # Open your submission & solutions file
+    with open(submission_file_name, "r") as file:
+        submission = json.load(file)
+    
+    with open(solutions_file_name, "r") as file:
+        solutions = json.load(file)
+
+    total_score = 0
+    total_tasks = 0
+    task_scores = {}
+
+    # Loop through each task in your submission to grade it
+    for task_id, task_submission in submission.items():
+        total_tasks += 1
+        task_score = 0
+        num_pairs = len(task_submission)
+
+        # Go through each task pair. Most will only have 1
+        for pair_index, pair_attempts in enumerate(task_submission):
+            pair_correct = False
+
+            # Look at both of your attempts
+            for attempt_key, attempt in pair_attempts.items():
+                
+                # Check to see if one is correct
+                if attempt == solutions[task_id][pair_index]:
+                    pair_correct = True
+                    break # If it is correct, log it and break the loop
+            
+            if pair_correct:
+                task_score += 1
+
+        # Get the average score across the sub-tasks/pairs
+        task_score /= num_pairs
+
+        # Add it to your total score
+        total_score += task_score
+
+        # Log it for that task
+        task_scores[task_id] = task_score
+
+    result = {
+        'total_score': total_score,
+        'total_tasks_scored': total_tasks
+    }
+
+    if include_task_scores:
+        result['task_scores'] = task_scores
+
+    return result
+
+
+submission_file_name = "./submission.json"
+solutions_file_name = "dataset/arc-agi_training_solutions.json"
+score = score_submission(submission_file_name, solutions_file_name, include_task_scores=True)
+
+print(json.dumps(score, indent=2))
+</file>
+
+<file path="solve_task.py">
+import os
+import sys
+import time
+import json
+import importlib
+import gc
+import multiprocessing
+import tqdm
+import traceback
+
+import numpy as np
+import torch
+
+import preprocessing
+import train
+import arc_compressor
+import initializers
+import multitensor_systems
+import layers
+import solution_selection
+import visualization
+
+"""
+A script that solves one puzzle, to be imported and used with parallel_train.py and multiprocessing.
+"""
+
+def solve_task(task_name, split, time_limit, n_train_iterations, gpu_id, memory_dict, solutions_dict, error_queue):
+    """
+    Solves a puzzle.
+    Args:
+        task_name (str): The name of the puzzle to solve.
+        split (str): 'training', 'evaluation', or 'test'
+        time_limit (float): An end time that will cause training to exit early if reached.
+        n_train_iterations (int): The number of iterations to train for.
+        gpu_id (int): The GPU number to run the solver on.
+        memory_dict (multiprocessing.Dict[str, int]): An inter-process shared dict that we
+            can store the amount of memory taken by this job in.
+        solutions_dict (multiprocessing.Dict[str, list[Dict[str, list[list[int]]]]]): An
+            inter-process shared dict that we can store the solution in.
+        error_queue (multiprocessing.Queue[Exception]): An inter-process shared queue to
+            put errors in when an exception occurs.
+    """
+
+    try:  # Error catching block that puts errors on the error_queue
+
+        torch.set_default_device('cuda')
+        torch.cuda.set_device(gpu_id)
+        torch.cuda.reset_peak_memory_stats()  # Measure the memory used.
+
+        # Get the task
+        with open(f'dataset/arc-agi_{split}_challenges.json', 'r') as f:
+            problems = json.load(f)
+        task = preprocessing.Task(task_name, problems[task_name], None)
+        del problems
+
+        # Set up the training
+        model = arc_compressor.ARCCompressor(task)
+        optimizer = torch.optim.Adam(model.weights_list, lr=0.01, betas=(0.5, 0.9))
+        train_history_logger = solution_selection.Logger(task)
+        train_history_logger.solution_most_frequent = tuple(((0, 0), (0, 0)) for example_num in range(task.n_test))
+        train_history_logger.solution_second_most_frequent = tuple(((0, 0), (0, 0)) for example_num in range(task.n_test))
+
+        # Training loop
+        for train_step in range(n_train_iterations):
+            train.take_step(task, model, optimizer, train_step, train_history_logger)
+            if time.time() > time_limit:
+                break
+
+        # Get the solution
+        example_list = []
+        for example_num in range(task.n_test):
+            attempt_1 = [list(row) for row in train_history_logger.solution_most_frequent[example_num]]
+            attempt_2 = [list(row) for row in train_history_logger.solution_second_most_frequent[example_num]]
+            example_list.append({'attempt_1': attempt_1, 'attempt_2': attempt_2})
+        del task
+        del model
+        del optimizer
+        del train_history_logger
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        # Store the result
+        memory_dict[task_name] = torch.cuda.max_memory_allocated()
+        solutions_dict[task_name] = example_list
+
+    except Exception as e:  # If error, write to the error queue
+        error_queue.put(traceback.format_exc())
+</file>
+
+<file path="analyze_example.py">
+import os
+import pickle
+from tqdm import tqdm
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+
+import train
+import preprocessing
+import arc_compressor
+import initializers
+import multitensor_systems
+import layers
+import solution_selection
+import visualization
+
+
+"""
+This file allows you to train one model on one task, and see plots of what
+the process and end result looks like. You can input the training split and
+the task code, and it will:
+- Train a model for 1500 steps,
+- Plot sampled solutions from the model at every 50 steps,
+- Plot the KL and reconstruction error over time,
+- Plot the contribution of each tensor shape to the KL over time,
+- Show top principal components of each tensor that still contributes to
+  the KL at the end of training.
+"""
+
+# For some reason trying to set the seed doesn't actually fix results.
+# Just run things over and over again until you see desired interesting behaviors.
+np.random.seed(0)
+torch.manual_seed(0)
+torch.set_default_dtype(torch.float32)
+torch.set_default_device('cuda')
+
+if __name__ == "__main__":
+
+    # Some interesting tasks: 272f95fa, 6d75e8bb, 6cdd2623, 41e4d17e, 2bee17df
+    # 228f6490, 508bd3b6, 2281f1f4, ecdecbb3
+    split = input('Enter which split you want to find the task in (training, evaluation, test): ')
+    task_name = input('Enter which task you want to analyze (eg. 272f95fa): ')
+    folder = task_name + '/'
+    print('Performing a training run on task', task_name,
+          'and placing the results in', folder)
+    os.makedirs(folder, exist_ok=True)
+
+    # Preprocess the task, set up the training
+    task = preprocessing.preprocess_tasks(split, [task_name])[0]
+    model = arc_compressor.ARCCompressor(task)
+    optimizer = torch.optim.Adam(model.weights_list, lr=0.01, betas=(0.5, 0.9))
+    train_history_logger = solution_selection.Logger(task)
+    visualization.plot_problem(train_history_logger)
+
+    # Perform training for 1500 iterations
+    n_iterations = 1500
+    for train_step in tqdm(range(n_iterations)):
+        train.take_step(task, model, optimizer, train_step, train_history_logger)
+        
+        # Plot solutions every 50 steps
+        if (train_step+1) % 50 == 0:
+            visualization.plot_solution(train_history_logger,
+                fname=folder + task_name + '_at_' + str(train_step+1) + ' steps.png')
+            visualization.plot_solution(train_history_logger,
+                fname=folder + task_name + '_at_' + str(train_step+1) + ' steps.pdf')
+
+    # Save the metrics, model weights, and learned representations.
+    np.savez(folder + task_name + '_KL_curves.npz',
+             KL_curves={key:np.array(val) for key, val in train_history_logger.KL_curves.items()},
+             reconstruction_error_curve=np.array(train_history_logger.reconstruction_error_curve),
+             multiposteriors=model.multiposteriors,
+             target_capacities=model.target_capacities,
+             decode_weights=model.decode_weights)
+
+    # Load the metrics, model weights, and learned representations.
+    stored_data = np.load(folder + task_name + '_KL_curves.npz', allow_pickle=True)
+    KL_curves = stored_data['KL_curves'][()]
+    reconstruction_error_curve = stored_data['reconstruction_error_curve']
+    multiposteriors = stored_data['multiposteriors'][()]
+    target_capacities = stored_data['target_capacities'][()]
+    decode_weights = stored_data['decode_weights'][()]
+    
+    # Plot the KL curves over time.
+    # For specific tasks that we found interesting, we wrote some
+    # code to color interesting KL components differently.
+    special_curve_colors = {
+            '272f95fa': {
+                'dims': [(1,0,0,1,0), (1,0,0,0,1), (0,1,1,0,0), (0,1,0,0,0)],
+                'colors': [(1, 0, 0), (0, 1, 0), (0, 0.5, 1), (0.5, 0, 1)]
+            },
+            '6cdd2623': {
+                'dims': [(1,0,0,1,0), (1,0,0,0,1), (1,1,0,0,0), (1,0,0,1,1), (0,0,1,0,0)],
+                'colors': [(1, 0.6, 0), (0, 1, 0), (0, 0.5, 1), (0.5, 0, 1), (1, 0, 0.5)]
+            },
+            '41e4d17e': {
+                'dims': [(1,0,0,1,1), (0,1,0,0,0)],
+                'colors': [(1, 0, 0), (0, 0, 1)]
+            },
+            '6d75e8bb': {
+                'dims': [(1,0,0,1,0), (1,0,0,0,1), (1,0,0,1,1), (0,1,0,0,0)],
+                'colors': [(1, 0, 0), (0, 1, 0), (0, 0.5, 1), (0.5, 0, 1)]
+            }
+    }
+    fig, ax = plt.subplots()
+    for component_name, curve in KL_curves.items():
+        line_color = (0.5, 0.5, 0.5)
+        label = None
+        if task_name in special_curve_colors:
+            dims_list = special_curve_colors[task_name]['dims']
+            colors_list = special_curve_colors[task_name]['colors']
+            for dims, color in zip(dims_list, colors_list):
+                if tuple(eval(component_name)) == dims:
+                    line_color = color
+                    axis_names = ['example', 'color', 'direction', 'height', 'width']
+                    axis_names = [axis_name
+                        for axis_name, axis_exists in zip(axis_names, dims) if axis_exists]
+                    label = '(' + ', '.join(axis_names) + ', channel)'
+        ax.plot(np.arange(curve.shape[0]), curve, color=line_color, label=label)
+    if task_name == '6cdd2623':
+        ax.set_ylim((0.3, 4e4))
+
+    ax.legend()
+    plt.yscale('log')
+    plt.xlabel('step')
+    plt.ylabel('KL contribution')
+    ax.grid(which='both', linestyle='-', linewidth='0.5', color='gray')
+    plt.savefig(folder + task_name + '_KL_components.png', bbox_inches='tight')
+    plt.close()
+
+    # Plot the KL vs reconstruction error
+    fig, ax = plt.subplots()
+    total_KL = 0
+    for component_name, curve in KL_curves.items():
+        total_KL = total_KL + curve
+    fig, ax = plt.subplots()
+    ax.plot(np.arange(total_KL.shape[0]), total_KL, label='KL from z', color='k')
+    ax.plot(np.arange(reconstruction_error_curve.shape[0]),
+            reconstruction_error_curve, label='reconstruction error', color='r')
+    ax.legend()
+    plt.yscale('log')
+    plt.xlabel('step')
+    plt.ylabel('total KL or reconstruction error')
+    ax.grid(which='both', linestyle='-', linewidth='0.5', color='gray')
+    plt.savefig(folder + task_name + '_KL_vs_reconstruction.png', bbox_inches='tight')
+    plt.close()
+
+    # Get the learned representation tensors
+    samples = []
+    for i in range(100):
+        sample, KL_amounts, KL_names = layers.decode_latents(target_capacities,
+                                           decode_weights, multiposteriors)
+        samples.append(sample)
+
+    def average_samples(dims, *items):
+        mean = torch.mean(torch.stack(items, dim=0), dim=0).detach().cpu().numpy()
+        all_but_last_dim = tuple(range(len(mean.shape) - 1))
+        mean = mean - np.mean(mean, axis=all_but_last_dim)
+        return mean
+    means = multitensor_systems.multify(average_samples)(*samples)
+
+    # Figure out which tensors contain significant information
+    dims_to_plot = []
+    for KL_amount, KL_name in zip(KL_amounts, KL_names):
+        dims = tuple(eval(KL_name))
+        if torch.sum(KL_amount).detach().cpu().numpy() > 1:
+            dims_to_plot.append(dims)
+
+    # Show the top principal components of the significant tensors.
+    color_names = ['black', 'blue', 'red', 'green', 'yellow', 'gray', 'magenta', 'orange', 'light blue', 'brown']
+    restricted_color_names = [color_names[i] for i in task.colors]
+    restricted_color_codes = [tuple((visualization.color_list[i]/255).tolist())
+                              for i in task.colors]
+    for dims in dims_to_plot:
+        tensor = means[dims]
+
+        orig_shape = tensor.shape
+        if len(orig_shape) == 2:
+            tensor = tensor[None,:,:]
+        orig_shape = tensor.shape
+        if len(orig_shape) == 3:
+            tensor = np.reshape(tensor, (-1, orig_shape[-1]))
+            U, S, Vh = np.linalg.svd(tensor)  # Get top 3 principal components
+            for component_num in range(3):
+                component = np.reshape(U[:,component_num], orig_shape[:-1])
+                component = component / np.max(np.abs(component))
+                strength = S[component_num] / tensor.shape[0]  # Calculate component strength
+
+                # Show the component
+                fig, ax = plt.subplots()
+                ax.imshow(component, cmap='gray', vmin=-1, vmax=1)
+                
+                # Pick the axis labels
+                axis_names = ['example', 'color', 'direction', 'height', 'width']
+                tensor_name = '_'.join([axis_name
+                    for axis_name, axis_exists in zip(axis_names, dims) if axis_exists])
+                if sum(dims) == 2:
+                    x_dim = [axis_names[i] for i, dim in enumerate(dims) if dim][0]
+                    y_dim = [axis_names[i] for i, dim in enumerate(dims) if dim][1]
+                else:
+                    x_dim = None
+                    y_dim = [axis_names[i] for i, dim in enumerate(dims) if dim][0]
+                plt.ylabel(x_dim)
+                plt.xlabel(y_dim)
+
+                if x_dim is None:
+                    ax.set_yticks([])
+                    ax.set_xticks([], minor=True)
+                if y_dim is None:
+                    ax.set_xticks([])
+                    ax.set_xticks([], minor=True)
+
+                # Set the tick labels
+                # Tick labels for example axis
+                if x_dim == 'example':
+                    ax.set_yticks(np.arange(task.n_examples))
+                if y_dim == 'example':
+                    ax.set_xticks(np.arange(task.n_examples))
+
+                # Tick labels for color axis
+                if x_dim == 'color':
+                    ax.set_yticks(np.arange(len(restricted_color_names[1:])))
+                    ax.set_yticklabels(restricted_color_names[1:])
+                    for ticklabel, tickcolor in zip(ax.get_yticklabels(), restricted_color_codes[1:]):
+                        ticklabel.set_color(tickcolor)
+                        ticklabel.set_fontweight("bold")
+                if y_dim == 'color':
+                    ax.set_xticks(np.arange(len(restricted_color_names[1:])))
+                    ax.set_xticklabels(restricted_color_names[1:])
+                    for ticklabel, tickcolor in zip(ax.get_xticklabels(), restricted_color_codes[1:]):
+                        ticklabel.set_color(tickcolor)
+                        ticklabel.set_fontweight("bold")
+
+                # Tick labels for direction axis
+                direction_names = ["↓", "↘", "→", "↗", "↑", "↖", "←", "↙"]
+                if x_dim == 'direction':
+                    ax.set_yticks(np.arange(8))
+                    ax.set_yticklabels(direction_names)
+                    ax.tick_params(axis='y', which='major', labelsize=22)
+                if y_dim == 'direction':
+                    ax.set_xticks(np.arange(8))
+                    ax.set_xticklabels(direction_names)
+                    ax.tick_params(axis='x', which='major', labelsize=22)
+
+                # Standard tick labels for height and width axes
+
+                ax.set_title('component' + str(component_num) + ', strength = ' + str(float(strength)))
+                plt.savefig(folder + task_name + '_' + tensor_name + '_component_' + str(component_num) + '.png', bbox_inches='tight')
+                plt.close()
+
+        # Plot an ({example, color, direction}, x, y) tensor with subplots
+        elif len(orig_shape) == 4 and dims[3] == 1 and dims[4] == 1:
+            tensor = np.reshape(tensor, (-1, orig_shape[-1]))
+            U, S, Vh = np.linalg.svd(tensor)  # Get the top 3 principal components
+            for component_num in range(3):
+                component = np.reshape(U[:,component_num], orig_shape[:-1])
+                component = component / np.max(np.abs(component))
+                strength = S[component_num] / tensor.shape[0]
+                n_plots = orig_shape[0]
+
+                # Make the subplots
+                fig, axs = plt.subplots(1, n_plots)
+                for plot_idx in range(n_plots):
+                    ax = axs[plot_idx]
+                    ax.imshow(component[plot_idx,:,:], cmap='gray', vmin=-1, vmax=1)
+
+                    # Get the axis labels
+                    axis_names = ['example', 'color', 'direction', 'height', 'width']
+                    tensor_name = '_'.join([axis_name
+                        for axis_name, axis_exists in zip(axis_names, dims) if axis_exists])
+                    ax_dim = [axis_names[i] for i, dim in enumerate(dims) if dim][0]
+                    x_dim = [axis_names[i] for i, dim in enumerate(dims) if dim][1]
+                    y_dim = [axis_names[i] for i, dim in enumerate(dims) if dim][2]
+                    ax.set_ylabel(x_dim)
+                    ax.set_xlabel(y_dim)
+
+                    # Standard tick labels for height and width axes
+
+                    # Label the subplots
+                    if ax_dim == 'example':
+                        ax.set_title('example ' + str(plot_idx))
+                    elif ax_dim == 'color':
+                        ax.set_title(restricted_color_names[plot_idx],
+                                     color=restricted_color_codes[plot_idx],
+                                     fontweight="bold")
+                    elif ax_dim == 'direction':
+                        direction_names = ["↓", "↘", "→", "↗", "↑", "↖", "←", "↙"]
+                        ax.set_title(direction_names[plot_idx], fontsize=22)
+
+                plt.subplots_adjust(wspace=1)
+                fig.suptitle('component ' + str(component_num) + ', strength = ' + str(float(strength)))
+                plt.subplots_adjust(top=1.4)
+                plt.savefig(folder + task_name + '_' + tensor_name + '_component_' + str(component_num) + '.png', bbox_inches='tight')
+                plt.close()
+
+
+print('done')
+</file>
+
+<file path="arc_compressor.py">
+import numpy as np
+import torch
+
+import initializers
+import layers
+
+
+np.random.seed(0)
+torch.manual_seed(0)
+torch.set_default_dtype(torch.float32)
+torch.set_default_device('cuda')
+
+
+class ARCCompressor:
+    """
+    The main model class for the VAE Decoder in our solution to ARC.
+    """
+
+    # Define the channel dimensions that all the layers use
+    n_layers = 4
+    share_up_dim = 16
+    share_down_dim = 8
+    decoding_dim = 4
+    softmax_dim = 2
+    cummax_dim = 4
+    shift_dim = 4
+    nonlinear_dim = 16
+
+    # This function gives the channel dimension of the residual stream depending on
+    # which dimensions are present, for every tensor in the multitensor.
+    def channel_dim_fn(self, dims):
+        return 16 if dims[2] == 0 else 8
+
+    def __init__(self, task):
+        """
+        Create a model that is tailored to the given task, and initialize all the weights.
+        The weights are symmetrized such that swapping the x and y dimension ordering should
+        make the output's dimension ordering also swapped, for the same weights. This may not
+        be exactly correct since symmetrizing all operations is difficult.
+        Args:
+            task (preprocessing.Task): The task which the model is to be made for solving.
+        """
+        self.multitensor_system = task.multitensor_system
+
+        # Initialize weights
+        initializer = initializers.Initializer(self.multitensor_system, self.channel_dim_fn)
+
+        self.multiposteriors = initializer.initialize_multiposterior(self.decoding_dim)
+        self.decode_weights = initializer.initialize_multilinear([self.decoding_dim, self.channel_dim_fn])
+        initializer.symmetrize_xy(self.decode_weights)
+        self.target_capacities = initializer.initialize_multizeros([self.decoding_dim])
+
+        self.share_up_weights = []
+        self.share_down_weights = []
+        self.softmax_weights = []
+        self.cummax_weights = []
+        self.shift_weights = []
+        self.direction_share_weights = []
+        self.nonlinear_weights = []
+
+        for layer_num in range(self.n_layers):
+            self.share_up_weights.append(initializer.initialize_multiresidual(self.share_up_dim, self.share_up_dim))
+            self.share_down_weights.append(initializer.initialize_multiresidual(self.share_down_dim, self.share_down_dim))
+            output_scaling_fn = lambda dims: self.softmax_dim * (2 ** (dims[1] + dims[2] + dims[3] + dims[4]) - 1)
+            self.softmax_weights.append(initializer.initialize_multiresidual(self.softmax_dim, output_scaling_fn))
+            self.cummax_weights.append(initializer.initialize_multiresidual(self.cummax_dim, self.cummax_dim))
+            self.shift_weights.append(initializer.initialize_multiresidual(self.shift_dim, self.shift_dim))
+            self.direction_share_weights.append(initializer.initialize_multidirection_share())
+            self.nonlinear_weights.append(initializer.initialize_multiresidual(self.nonlinear_dim, self.nonlinear_dim))
+
+        self.head_weights = initializer.initialize_head()
+        self.mask_weights = initializer.initialize_linear(
+            [1, 0, 0, 1, 0], [self.channel_dim_fn([1, 0, 0, 1, 0]), 2]
+        )
+
+        # Symmetrize weights so that their behavior is equivariant to swapping x and y dimension ordering
+        for weight_list in [
+            self.share_up_weights,
+            self.share_down_weights,
+            self.softmax_weights,
+            self.cummax_weights,
+            self.shift_weights,
+            self.nonlinear_weights,
+        ]:
+            for layer_num in range(self.n_layers):
+                initializer.symmetrize_xy(weight_list[layer_num])
+
+        for layer_num in range(self.n_layers):
+            initializer.symmetrize_direction_sharing(self.direction_share_weights[layer_num])
+
+        self.weights_list = initializer.weights_list
+
+
+    def forward(self):
+        """
+        Compute the forward pass of the VAE decoder. Start by using internally stored latents,
+        and process from there. Output an [example, color, x, y, channel] tensor for the colors,
+        and an [example, x, channel] and [example, y, channel] tensor for the masks.
+        Returns:
+            Tensor: An [example, color, x, y, channel] tensor, where for every example,
+                    input/output (picked by channel dimension), and every pixel (picked
+                    by x and y dimensions), we have a vector full of logits for that
+                    pixel being each possible color.
+            Tensor: An [example, x, channel] tensor, where for every example, input/output
+                    (picked by channel dimension), and every x, we assign a score that
+                    contributes to the likelihood that that index of the x dimension is not
+                    masked out in the prediction.
+            Tensor: An [example, y, channel] tensor, used in the same way as above.
+            list[Tensor]: A list of tensors indicating the amount of KL contributed by each component
+                    tensor in the layers.decode_latents() step.
+            list[str]: A list of tensor names that correspond to each tensor in the aforementioned output.
+        """
+        # Decoding layer
+        x, KL_amounts, KL_names = layers.decode_latents(
+            self.target_capacities, self.decode_weights, self.multiposteriors
+        )
+
+        for layer_num in range(self.n_layers):
+            # Multitensor communication layer
+            x = layers.share_up(x, self.share_up_weights[layer_num])
+
+            # Softmax layer
+            x = layers.softmax(x, self.softmax_weights[layer_num], pre_norm=True, post_norm=False, use_bias=False)
+
+            # Directional layers
+            x = layers.cummax(
+                x, self.cummax_weights[layer_num], self.multitensor_system.task.masks,
+                pre_norm=False, post_norm=True, use_bias=False
+            )
+            x = layers.shift(
+                x, self.shift_weights[layer_num], self.multitensor_system.task.masks,
+                pre_norm=False, post_norm=True, use_bias=False
+            )
+
+            # Directional communication layer
+            x = layers.direction_share(x, self.direction_share_weights[layer_num], pre_norm=True, use_bias=False)
+
+            # Nonlinear layer
+            x = layers.nonlinear(x, self.nonlinear_weights[layer_num], pre_norm=True, post_norm=False, use_bias=False)
+
+            # Multitensor communication layer
+            x = layers.share_down(x, self.share_down_weights[layer_num])
+
+            # Normalization layer
+            x = layers.normalize(x)
+
+        # Linear Heads
+        output = (
+            layers.affine(x[[1, 1, 0, 1, 1]], self.head_weights, use_bias=False)
+            + 100 * self.head_weights[1]
+        )
+        x_mask = layers.affine(x[[1, 0, 0, 1, 0]], self.mask_weights, use_bias=True)
+        y_mask = layers.affine(x[[1, 0, 0, 0, 1]], self.mask_weights, use_bias=True)
+
+        # Postprocessing
+        x_mask, y_mask = layers.postprocess_mask(self.multitensor_system.task, x_mask, y_mask)
+
+        return output, x_mask, y_mask, KL_amounts, KL_names
+</file>
+
+<file path="preprocessing.py">
+import json
+import numpy as np
+import torch
+import multitensor_systems
+
+np.random.seed(0)
+torch.manual_seed(0)
+
+class Task:
+    """
+    A class that helps deal with task-specific operations such as preprocessing,
+    grid shape handling, solution processing, etc. Sets up the task-specific
+    multitensor system to be used to construct the network.
+    """
+    def __init__(self, task_name, problem, solution):
+        self.task_name = task_name
+        self.n_train = len(problem['train'])
+        self.n_test = len(problem['test'])
+        self.n_examples = self.n_train + self.n_test
+        self.unprocessed_problem = problem
+
+        self.shapes = self._collect_problem_shapes(problem)
+        self._predict_solution_shapes()
+        self._construct_multitensor_system(problem)
+        self._compute_mask()
+        self._create_problem_tensor(problem)
+
+        self.solution = self._create_solution_tensor(solution) if solution else None
+        if solution is None:
+            self.solution_hash = None
+
+    def _collect_problem_shapes(self, problem):
+        """
+        Extract input/output shapes for each example.
+        """
+        shapes = []
+        for split_name in ['train', 'test']:
+            for example in problem[split_name]:
+                in_shape = list(np.array(example['input']).shape)
+                out_shape = list(np.array(example['output']).shape) if 'output' in example else None
+                shapes.append([in_shape, out_shape])
+        return shapes
+
+    def _predict_solution_shapes(self):
+        """
+        Predict output shapes when not explicitly provided.
+        """
+        self.in_out_same_size = all(tuple(inp) == tuple(out) for inp, out in self.shapes[:self.n_train])
+        self.all_in_same_size = len({tuple(shape[0]) for shape in self.shapes}) == 1
+        self.all_out_same_size = len({tuple(shape[1]) for shape in self.shapes if shape[1]}) == 1
+
+        if self.in_out_same_size:
+            for shape in self.shapes[self.n_train:]:
+                shape[1] = shape[0]
+        elif self.all_out_same_size:
+            default_shape = self.shapes[0][1]
+            for shape in self.shapes[self.n_train:]:
+                shape[1] = default_shape
+        else:
+            max_x, max_y = self._get_max_dimensions()
+            for shape in self.shapes[self.n_train:]:
+                shape[1] = [max_x, max_y]
+
+    def _get_max_dimensions(self):
+        max_x, max_y = 0, 0
+        for in_out_pair in self.shapes:
+            for shape in in_out_pair:
+                if shape:
+                    max_x = max(max_x, shape[0])
+                    max_y = max(max_y, shape[1])
+        return max_x, max_y
+
+    def _construct_multitensor_system(self, problem):
+        """
+        Build tensor system with appropriate sizes.
+        """
+        self.n_x = max(shape[i][0] for shape in self.shapes for i in range(2))
+        self.n_y = max(shape[i][1] for shape in self.shapes for i in range(2))
+
+        colors = {color 
+                  for split in ['train', 'test']
+                  for example in problem[split] 
+                  for grid in [example['input'], example.get('output', [])]
+                  for row in grid
+                  for color in row}
+        colors.add(0)  # Always include black as background
+
+        self.colors = list(sorted(colors))
+        self.n_colors = len(self.colors) - 1
+
+        self.multitensor_system = multitensor_systems.MultiTensorSystem(
+            self.n_examples, self.n_colors, self.n_x, self.n_y, self
+        )
+
+    def _create_problem_tensor(self, problem):
+        """
+        Convert input/output grids to tensors.
+        """
+        self.problem = np.zeros((self.n_examples, self.n_colors + 1, self.n_x, self.n_y, 2))
+        
+        for subsplit, n_examples in [('train', self.n_train), ('test', self.n_test)]:
+            for example_num, example in enumerate(problem[subsplit]):
+                new_example_num = example_num if subsplit == 'train' else self.n_train + example_num
+
+                for mode in ('input', 'output'):
+                    if subsplit == 'test' and mode == 'output':
+                        continue
+
+                    grid = self._create_grid_tensor(
+                        example.get(mode, np.zeros(self.shapes[new_example_num][1]))
+                    )
+                    mode_num = 0 if mode == 'input' else 1
+                    self.problem[new_example_num, :, :grid.shape[1], :grid.shape[2], mode_num] = grid
+
+        self.problem = torch.from_numpy(np.argmax(self.problem, axis=1)).to(torch.get_default_device())
+
+    def _create_grid_tensor(self, grid):
+        return np.array([
+            [[1 if self.colors.index(color) == ref_color else 0
+              for color in row]
+             for row in grid]
+            for ref_color in range(self.n_colors + 1)
+        ])
+
+    def _create_solution_tensor(self, solution):
+        """
+        Convert solution grids to tensors for crossentropy evaluation.
+        """
+        solution_tensor = np.zeros((self.n_test, self.n_colors + 1, self.n_x, self.n_y))
+        solution_tuple = ()
+
+        for example_num, grid in enumerate(solution):
+            solution_tuple += (tuple(map(tuple, grid)),)
+            grid_tensor = self._create_grid_tensor(grid)
+            # unfortunately sometimes the solution tensor will be bigger than (n_x, n_y), and in these cases
+            # we'll never get the solution.
+            min_x, min_y = min(grid_tensor.shape[1], self.n_x), min(grid_tensor.shape[2], self.n_y)
+            solution_tensor[example_num, :, :min_x, :min_y] = grid_tensor[:, :min_x, :min_y]
+
+        self.solution_hash = hash(solution_tuple)
+        return torch.from_numpy(np.argmax(solution_tensor, axis=1)).to(torch.get_default_device())
+
+    def _compute_mask(self):
+        """
+        Compute masks for activations and cross-entropies.
+        """
+        self.masks = np.zeros((self.n_examples, self.n_x, self.n_y, 2))
+
+        for example_num, (in_shape, out_shape) in enumerate(self.shapes):
+            for mode_num, shape in enumerate([in_shape, out_shape]):
+                if shape:
+                    x_mask = np.arange(self.n_x) < shape[0]
+                    y_mask = np.arange(self.n_y) < shape[1]
+                    self.masks[example_num, :, :, mode_num] = np.outer(x_mask, y_mask)
+
+        self.masks = torch.from_numpy(self.masks).to(torch.get_default_dtype()).to(torch.get_default_device())
+
+
+def preprocess_tasks(split, task_nums_or_task_names):
+    """
+    Preprocess tasks by loading problems and solutions.
+    """
+    with open(f'dataset/arc-agi_{split}_challenges.json', 'r') as f:
+        problems = json.load(f)
+
+    solutions = None if split == "test" else json.load(open(f'dataset/arc-agi_{split}_solutions.json'))
+    
+    task_names = list(problems.keys())
+    
+    return [Task(task_name,
+                 problems[task_name],
+                 solutions.get(task_name) if solutions else None)
+            for task_name in task_names
+            if task_name in task_nums_or_task_names or task_names.index(task_name) in task_nums_or_task_names]
+</file>
+
+<file path="solution_selection.py">
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+np.random.seed(0)
+torch.manual_seed(0)
+
+class Logger:
+    """
+    This class contains functionalities relating to the recording of model outputs, postprocessing,
+    selection of most frequently sampled/highest scoring solutions, accuracy computations, and more.
+    """
+    ema_decay = 0.97
+
+    def __init__(self, task):
+        self.task = task
+        self.KL_curves = {}
+        self.total_KL_curve = []
+        self.reconstruction_error_curve = []
+        self.loss_curve = []
+
+        n_test, n_colors, n_x, n_y = task.n_test, task.n_colors, task.n_x, task.n_y
+        shape = (n_test, n_colors + 1, n_x, n_y)
+
+        self.current_logits = torch.zeros(shape)
+        self.current_x_mask = torch.zeros((n_test, n_x))
+        self.current_y_mask = torch.zeros((n_test, n_y))
+
+        self.ema_logits = torch.zeros(shape)
+        self.ema_x_mask = torch.zeros((n_test, n_x))
+        self.ema_y_mask = torch.zeros((n_test, n_y))
+
+        self.solution_hashes_count = {}
+        self.solution_most_frequent = None
+        self.solution_second_most_frequent = None
+
+        self.solution_contributions_log = []
+        self.solution_picks_history = []
+
+    def log(self, train_step, logits, x_mask, y_mask, KL_amounts, KL_names, total_KL, reconstruction_error, loss):
+        """Logs training progress and tracks solutions from one forward pass."""
+        if train_step == 0:
+            self.KL_curves = {KL_name: [] for KL_name in KL_names}
+
+        for KL_amount, KL_name in zip(KL_amounts, KL_names):
+            self.KL_curves[KL_name].append(float(KL_amount.detach().sum().cpu().numpy()))
+
+        self.total_KL_curve.append(float(total_KL.detach().cpu().numpy()))
+        self.reconstruction_error_curve.append(float(reconstruction_error.detach().cpu().numpy()))
+        self.loss_curve.append(float(loss.detach().cpu().numpy()))
+
+        self._track_solution(train_step, logits.detach(), x_mask.detach(), y_mask.detach())
+
+    def _track_solution(self, train_step, logits, x_mask, y_mask):
+        """Postprocess and score solutions and keep track of the top two solutions with highest scores."""
+        self.current_logits = logits[self.task.n_train:, :, :, :, 1]  # example, color, x, y
+        self.current_x_mask = x_mask[self.task.n_train:, :, 1]  # example, x
+        self.current_y_mask = y_mask[self.task.n_train:, :, 1]  # example, y
+
+        self.ema_logits = self.ema_decay * self.ema_logits + (1 - self.ema_decay) * self.current_logits
+        self.ema_x_mask = self.ema_decay * self.ema_x_mask + (1 - self.ema_decay) * self.current_x_mask
+        self.ema_y_mask = self.ema_decay * self.ema_y_mask + (1 - self.ema_decay) * self.current_y_mask
+
+        solution_contributions = []
+        for logits, x_mask_set, y_mask_set in [  # Add two potential solutions: sample and mean.
+            (self.current_logits, self.current_x_mask, self.current_y_mask),
+            (self.ema_logits, self.ema_x_mask, self.ema_y_mask)
+        ]:
+
+            # Get the solution and the score.
+            solution, uncertainty = self._postprocess_solution(logits, x_mask_set, y_mask_set)
+            hashed_solution = hash(solution)
+            score = -10*uncertainty
+            if train_step < 150:
+                score = score - 10
+            if logits is self.ema_logits:
+                score = score - 4
+
+            # Accumulate scores for solutions.
+            solution_contributions.append((hashed_solution, score))
+            self.solution_hashes_count[hashed_solution] = float(np.logaddexp(
+                self.solution_hashes_count.get(hashed_solution, -np.inf), score))
+
+            self._update_most_frequent_solutions(hashed_solution, solution)
+
+        self.solution_contributions_log.append(solution_contributions)
+        self.solution_picks_history.append([hash(sol) for sol in [
+            self.solution_most_frequent, self.solution_second_most_frequent]])
+
+    def _update_most_frequent_solutions(self, hashed, solution):
+        """Keeps track of the top two solutions with highest scores."""
+        if self.solution_most_frequent is None:
+            self.solution_most_frequent = solution
+        if self.solution_second_most_frequent is None:
+            self.solution_second_most_frequent = solution
+
+        if hashed != hash(self.solution_most_frequent):
+            if self.solution_hashes_count[hashed] >= self.solution_hashes_count.get(
+                    hash(self.solution_second_most_frequent), -np.inf):
+                self.solution_second_most_frequent = solution
+                if self.solution_hashes_count[hashed] >= self.solution_hashes_count.get(
+                        hash(self.solution_most_frequent), -np.inf):
+                    self.solution_second_most_frequent = self.solution_most_frequent
+                    self.solution_most_frequent = solution
+
+    def best_crop(self, prediction, x_mask, x_length, y_mask, y_length):
+        x_start, x_end = self._best_slice_point(x_mask, x_length)
+        y_start, y_end = self._best_slice_point(y_mask, y_length)
+        return prediction[..., x_start:x_end, y_start:y_end]
+
+    def _best_slice_point(self, mask, length):
+        if self.task.in_out_same_size or self.task.all_out_same_size:
+            search_lengths = [length]
+        else:
+            search_lengths = list(range(1, mask.shape[0]+1))
+        max_logprob, best_slice_start, best_slice_end = None, None, None
+
+        for length in search_lengths:
+            logprobs = torch.stack([
+                -torch.sum(mask[:offset]) + torch.sum(mask[offset:offset + length]) - torch.sum(mask[offset + length:])
+                for offset in range(mask.shape[0] - length + 1)
+            ])
+            if max_logprob is None or torch.max(logprobs) > max_logprob:
+                max_logprob = torch.max(logprobs)
+                best_slice_start = torch.argmax(logprobs).item()
+                best_slice_end = best_slice_start + length
+
+        return best_slice_start, best_slice_end
+
+    def _postprocess_solution(self, prediction, x_mask, y_mask):  # prediction must be example, color, x, y
+        """Postprocess a solution and compute some variables that are used to calculate the score."""
+        colors = torch.argmax(prediction, dim=1)  # example, x, y
+        uncertainties = torch.logsumexp(prediction, dim=1) - torch.amax(prediction, dim=1)  # example, x, y
+        solution_slices, uncertainty_values = [], []  # example, x, y; example
+
+        for example_num in range(self.task.n_test):
+            x_length = None
+            y_length = None
+            if self.task.in_out_same_size or self.task.all_out_same_size:
+                x_length = self.task.shapes[self.task.n_train+example_num][1][0]
+                y_length = self.task.shapes[self.task.n_train+example_num][1][1]
+            solution_slice = self.best_crop(colors[example_num],
+                                            x_mask[example_num],
+                                            x_length,
+                                            y_mask[example_num],
+                                            y_length)  # x, y
+            uncertainty_slice = self.best_crop(uncertainties[example_num],
+                                               x_mask[example_num],
+                                               x_length,
+                                               y_mask[example_num],
+                                               y_length)  # x, y
+
+            solution_slices.append(solution_slice.cpu().numpy().tolist())
+            uncertainty_values.append(float(np.mean(uncertainty_slice.cpu().numpy())))
+
+        for example in solution_slices:
+            for row in example:
+                for i, val in enumerate(row):
+                    row[i] = self.task.colors[val]
+
+        solution_slices = tuple(tuple(tuple(row) for row in example) for example in solution_slices)
+        return solution_slices, np.mean(uncertainty_values)
+
+
+def save_predictions(loggers, fname='predictions.npz'):
+    """Saves solution score contributions and history of chosen solutions."""
+    np.savez(fname,
+             solution_contribution_logs=[logger.solution_contributions_log for logger in loggers],
+             solution_picks_histories=[logger.solution_picks_history for logger in loggers])
+
+
+def plot_accuracy(true_solution_hashes, fname='predictions.npz'):
+    """Plots accuracy curve over training iterations."""
+    stored_data = np.load(fname, allow_pickle=True)
+    solution_picks_histories = stored_data['solution_picks_histories']
+
+    n_tasks = len(solution_picks_histories)
+    n_iterations = len(solution_picks_histories[0])
+
+    correct = np.array([[
+        int(any(hash_ == true_solution_hashes[task_num] for hash_ in solution_pair))
+        for solution_pair in task_history
+    ] for task_num, task_history in enumerate(solution_picks_histories)])
+
+    accuracy_curve = correct.mean(axis=0)
+
+    plt.figure()
+    plt.plot(np.arange(n_iterations), accuracy_curve, 'k-')
+    plt.savefig('accuracy_curve.pdf', bbox_inches='tight')
+    plt.close()
+</file>
+
+<file path="train.py">
+import time
+
+import numpy as np
+import torch
+
+import preprocessing
+import arc_compressor
+import initializers
+import multitensor_systems
+import layers
+import solution_selection
+import visualization
+
+
+"""
+This file trains a model for every ARC-AGI task in a split.
+"""
+
+np.random.seed(0)
+torch.manual_seed(0)
+
+
+def mask_select_logprobs(mask, length):
+    """
+    Figure out the unnormalized log probability of taking each slice given the output mask.
+    """
+    logprobs = []
+    for offset in range(mask.shape[0]-length+1):
+        logprob = -torch.sum(mask[:offset])
+        logprob = logprob + torch.sum(mask[offset:offset+length])
+        logprob = logprob - torch.sum(mask[offset+length:])
+        logprobs.append(logprob)
+    logprobs = torch.stack(logprobs, dim=0)
+    log_partition = torch.logsumexp(logprobs, dim=0)
+    return log_partition, logprobs
+
+def take_step(task, model, optimizer, train_step, train_history_logger):
+    """
+    Runs a forward pass of the model on the ARC-AGI task.
+    Args:
+        task (Task): The ARC-AGI task containing the problem.
+        model (ArcCompressor): The VAE decoder model to run the forward pass with.
+        optimizer (torch.optim.Optimizer): The optimizer used to take the step on the model weights.
+        train_step (int): The training iteration number.
+        train_history_logger (Logger): A logger object used for logging the forward pass outputs
+                of the model, as well as accuracy and other things.
+    """
+
+    optimizer.zero_grad()
+    logits, x_mask, y_mask, KL_amounts, KL_names, = model.forward()
+    logits = torch.cat([torch.zeros_like(logits[:,:1,:,:]), logits], dim=1)  # add black color to logits
+
+    # Compute the total KL loss
+    total_KL = 0
+    for KL_amount in KL_amounts:
+        total_KL = total_KL + torch.sum(KL_amount)
+
+    # Compute the reconstruction error
+    reconstruction_error = 0
+    for example_num in range(task.n_examples):  # sum over examples
+        for in_out_mode in range(2):  # sum over in/out grid per example
+            if example_num >= task.n_train and in_out_mode == 1:
+                continue
+
+            # Determine whether the grid size is already known.
+            # If not, there is an extra term in the reconstruction error, corresponding to
+            # the probability of reconstructing the correct grid size.
+            grid_size_uncertain = not (task.in_out_same_size or task.all_out_same_size and in_out_mode==1 or task.all_in_same_size and in_out_mode==0)
+            if grid_size_uncertain:
+                coefficient = 0.01**max(0, 1-train_step/100)
+            else:
+                coefficient = 1
+            logits_slice = logits[example_num,:,:,:,in_out_mode]  # color, x, y
+            problem_slice = task.problem[example_num,:,:,in_out_mode]  # x, y
+            output_shape = task.shapes[example_num][in_out_mode]
+            x_log_partition, x_logprobs = mask_select_logprobs(coefficient*x_mask[example_num,:,in_out_mode], output_shape[0])
+            y_log_partition, y_logprobs = mask_select_logprobs(coefficient*y_mask[example_num,:,in_out_mode], output_shape[1])
+            # Account for probability of getting right grid size, if grid size is not known
+            if grid_size_uncertain:
+                x_log_partitions = []
+                y_log_partitions = []
+                for length in range(1, x_mask.shape[1]+1):
+                    x_log_partitions.append(mask_select_logprobs(coefficient*x_mask[example_num,:,in_out_mode], length)[0])
+                for length in range(1, y_mask.shape[1]+1):
+                    y_log_partitions.append(mask_select_logprobs(coefficient*y_mask[example_num,:,in_out_mode], length)[0])
+                x_log_partition = torch.logsumexp(torch.stack(x_log_partitions, dim=0), dim=0)
+                y_log_partition = torch.logsumexp(torch.stack(y_log_partitions, dim=0), dim=0)
+
+            # Given that we have the correct grid size, get the reconstruction error of getting the colors right
+            logprobs = [[] for x_offset in range(x_logprobs.shape[0])]  # x, y
+            for x_offset in range(x_logprobs.shape[0]):
+                for y_offset in range(y_logprobs.shape[0]):
+                    logprob = x_logprobs[x_offset] - x_log_partition + y_logprobs[y_offset] - y_log_partition  # given the correct grid size,
+                    logits_crop = logits_slice[:,x_offset:x_offset+output_shape[0],y_offset:y_offset+output_shape[1]]  # c, x, y
+                    target_crop = problem_slice[:output_shape[0],:output_shape[1]]  # x, y
+                    logprob = logprob - torch.nn.functional.cross_entropy(logits_crop[None,...], target_crop[None,...], reduction='sum')  # calculate the error for the colors.
+                    logprobs[x_offset].append(logprob)
+            logprobs = torch.stack([torch.stack(logprobs_, dim=0) for logprobs_ in logprobs], dim=0)  # x, y
+            if grid_size_uncertain:
+                coefficient = 0.1**max(0, 1-train_step/100)
+            else:
+                coefficient = 1
+            logprob = torch.logsumexp(coefficient*logprobs, dim=(0,1))/coefficient  # Aggregate for all possible grid sizes
+            reconstruction_error = reconstruction_error - logprob
+
+    loss = total_KL + 10*reconstruction_error
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+
+    # Performance recording
+    train_history_logger.log(train_step,
+                             logits,
+                             x_mask,
+                             y_mask,
+                             KL_amounts,
+                             KL_names,
+                             total_KL,
+                             reconstruction_error,
+                             loss)
+
+
+if __name__ == "__main__":
+    start_time = time.time()
+
+    task_nums = list(range(400))
+    split = "training"  # "training", "evaluation, or "test"
+
+    # Preprocess all tasks, make models, optimizers, and loggers. Make plots.
+    tasks = preprocessing.preprocess_tasks(split, task_nums)
+    models = []
+    optimizers = []
+    train_history_loggers = []
+    for task in tasks:
+        model = arc_compressor.ARCCompressor(task)
+        models.append(model)
+        optimizer = torch.optim.Adam(model.weights_list, lr=0.01, betas=(0.5, 0.9))
+        optimizers.append(optimizer)
+        train_history_logger = solution_selection.Logger(task)
+        visualization.plot_problem(train_history_logger)
+        train_history_loggers.append(train_history_logger)
+
+    # Get the solution hashes so that we can check for correctness
+    true_solution_hashes = [task.solution_hash for task in tasks]
+
+    # Train the models one by one
+    for i, (task, model, optimizer, train_history_logger) in enumerate(zip(tasks, models, optimizers, train_history_loggers)):
+        n_iterations = 2000
+        for train_step in range(n_iterations):
+            take_step(task, model, optimizer, train_step, train_history_logger)
+        visualization.plot_solution(train_history_logger)
+        solution_selection.save_predictions(train_history_loggers[:i+1])
+        solution_selection.plot_accuracy(true_solution_hashes)
+
+    # Write down how long it all took
+    with open('timing_result.txt', 'w') as f:
+        f.write("Time elapsed in seconds: " + str(time.time() - start_time))
+</file>
+
+<file path="initializers.py">
+import numpy as np
+import torch
+import multitensor_systems
+
+
+np.random.seed(0)
+torch.manual_seed(0)
+
+
+class Initializer:
+    def __init__(self, multitensor_system, channel_dim_fn):
+        """
+        Initializes weight tensors for a multitensor system.
+        Args:
+            multitensor_system (MultiTensorSystem): The multitensor system that we want to use
+                    for initializing weights.
+            channel_dim_fn (function): A function that takes in a dims list of type list[int], and
+                    returns an int representing the channel dimension size.
+        """
+        self.multitensor_system = multitensor_system
+        self.channel_dim_fn = channel_dim_fn
+        self.weights_list = []
+
+    def initialize_zeros(self, dims, shape):
+        """Initializes a weight tensor with zeros."""
+        if callable(shape):
+            shape = shape(dims)
+        zeros = torch.zeros(shape, requires_grad=True)
+        self.weights_list.append(zeros)
+        return zeros
+
+    def initialize_linear(self, dims, shape):
+        """Initializes a linear transformation."""
+        if callable(shape):
+            shape = shape(dims)
+        n_in, n_out = shape
+
+        if callable(n_in):
+            n_in = n_in(dims)
+        if callable(n_out):
+            n_out = n_out(dims)
+
+        scale = 1 / np.sqrt(n_in)
+        weight = scale * torch.randn(n_in, n_out)
+        bias = scale * torch.randn(n_out)
+        weight.requires_grad = True
+        bias.requires_grad = True
+
+        self.weights_list.extend([weight, bias])
+        return [weight, bias]
+
+    def initialize_residual(self, dims, n_in, n_out):
+        """Initializes two linear layers that map to and from the residual stream."""
+        linear_1 = self.initialize_linear(dims, [self.channel_dim_fn, n_in])
+        linear_2 = self.initialize_linear(dims, [n_out, self.channel_dim_fn])
+        return [linear_1, linear_2]
+
+    def initialize_posterior(self, dims, channel_dim):
+        """Initializes a posterior z distribution for the decoding layer."""
+        if callable(channel_dim):
+            channel_dim = channel_dim(dims)
+
+        shape = self.multitensor_system.shape(dims, channel_dim)
+        mean = 0.01 * torch.randn(shape)
+        mean.requires_grad=True
+        local_capacity_adjustment = self.initialize_zeros(dims, shape)
+
+        self.weights_list.append(mean)
+        return [mean, local_capacity_adjustment]
+
+    def initialize_direction_share(self, dims, _):
+        """
+        Initializes linear maps for the directional communication layer. Symmetrization
+        is to be performed later by symmetrize_direction_sharing().
+        """
+        channel_dim_fn = self.channel_dim_fn
+        return [[self.initialize_linear(dims, [channel_dim_fn, channel_dim_fn]) for _ in range(8)] for _ in range(8)]
+
+    def initialize_head(self):
+        """Initializes the linear head while ensuring symmetry wrt swapping x and y."""
+        dims = [1, 1, 0, 1, 1]
+        head_weights = self.initialize_linear(dims, [self.channel_dim_fn(dims), 2])
+
+        # Ensure symmetry
+        head_weights[0].requires_grad = False
+        head_weights[0] = torch.stack([head_weights[0][..., 0]] * 2, dim=-1)
+        head_weights[0].requires_grad = True
+
+        # Maintain correct weight list order
+        self.weights_list[-2] = head_weights[0]
+        return head_weights
+
+    # The functions below serve to perform the initializations once per tensor
+    # in the multitensor. Functions can also be fed in as arguments instead,
+    # and they will be run with dims as an argument, to produce a different
+    # argument for every tensor in the multitensor.
+    def initialize_multizeros(self, shape):
+        return multitensor_systems.multify(self.initialize_zeros)(
+            self.multitensor_system.make_multitensor(default=shape)
+        )
+
+    def initialize_multilinear(self, shape):
+        return multitensor_systems.multify(self.initialize_linear)(
+            self.multitensor_system.make_multitensor(default=shape)
+        )
+
+    def initialize_multiresidual(self, n_in, n_out):
+        return multitensor_systems.multify(self.initialize_residual)(
+            n_in, self.multitensor_system.make_multitensor(default=n_out)
+        )
+
+    def initialize_multiposterior(self, decoding_dim):
+        return multitensor_systems.multify(self.initialize_posterior)(
+            self.multitensor_system.make_multitensor(default=decoding_dim)
+        )
+
+    def initialize_multidirection_share(self):
+        return multitensor_systems.multify(self.initialize_direction_share)(
+            self.multitensor_system.make_multitensor()
+        )
+
+    def symmetrize_xy(self, multiweights):
+        """Ensures xy swap symmetry for weights by enforcing shared values."""
+        for dims in self.multitensor_system:
+            if dims[3] == 0 and dims[4] == 1:
+                multiweights[dims] = multiweights[dims[:3] + [1, 0]]
+
+    def symmetrize_direction_sharing(self, multiweights):
+        """
+        Ensures xy swap symmetry for weights by enforcing shared values.
+        Enforcement of shared values is more complicated since the direction axis
+        is involved, which has individual indices assigned to individual directions.
+        """
+
+        # For every directional communication linear map, identify one linear map
+        # that will serve as the representative map for all reachable maps under
+        # the equivariance transformation. Always use that representative map.
+        for dims in self.multitensor_system:
+            for dir1 in range(8):
+                for dir2 in range(8):
+                    from_dims = dims
+                    from_dir1, from_dir2 = dir1, dir2
+
+                    # Apply the transformations under certain conditions to reduce a map
+                    # to the representative map.
+                    if dims[3] + dims[4] == 1:
+                        from_dims = dims[:3] + [1, 0]
+                        if dims[4] == 1:
+                            from_dir1 = (2 + from_dir1) % 8
+                            from_dir2 = (2 + from_dir2) % 8
+
+                        if from_dir1 > 4 or (from_dir1 in {0, 4} and from_dir2 > 4):
+                            from_dir1 = (8 - from_dir1) % 8
+                            from_dir2 = (8 - from_dir2) % 8
+
+                        if 2 < from_dir1 < 6 or (from_dir1 in {2, 6} and 2 < from_dir2 < 6):
+                            from_dir1 = (4 - from_dir1) % 8
+                            from_dir2 = (4 - from_dir2) % 8
+                    else:
+                        rotation = (from_dir1 // 2) * 2
+                        from_dir1 = (from_dir1 - rotation) % 8
+                        from_dir2 = (from_dir2 - rotation) % 8
+
+                        if (from_dir2 - from_dir1) % 8 > 4:
+                            from_dir2 = (8 + 2 * from_dir1 - from_dir2) % 8
+
+                    # Copy down the representative map for later use.
+                    multiweights[dims][dir1][dir2] = multiweights[from_dims][from_dir1][from_dir2]
+</file>
+
+<file path="layers.py">
+import itertools
+
+import numpy as np
+import torch
+
+import multitensor_systems
+
+"""
+This file contains all of the layers of our network. The architecture which puts the layers
+together is found in arc_compressor.py.
+"""
+
+np.random.seed(0)
+torch.manual_seed(0)
+
+
+@multitensor_systems.multify
+def normalize(dims, x, debias=True):
+    """
+    Normalize the tensor to have variance one, for every index along the channel dimension.
+    Args:
+        dims (list[int]): Tells you which tensor in the multitensor system we're normalizing
+        x (Tensor): Tensor to normalize.
+    Returns:
+        Tensor: Normalized tensor.
+    """
+    all_but_last = list(range(len(x.shape)-1))
+    if debias:
+        x = x - torch.mean(x, dim=all_but_last)
+    x = x / torch.sqrt(1e-8+torch.mean(x**2, dim=all_but_last))
+    return x
+
+@multitensor_systems.multify
+def affine(dims, x, weight, use_bias=False):
+    """
+    Apply a linear layer to a tensor, along the channel dimension.
+    Args:
+        dims (list[int]): Tells you which tensor in the multitensor system we're normalizing
+        x (Tensor): Input to the linear layer.
+        weight (list[Tensor]): A weight matrix and a bias vector.
+    Returns:
+        Tensor: Output of the linear layer.
+    """
+    x = torch.matmul(x, weight[0])
+    if use_bias:
+        x = x + weight[1]
+    return x
+
+def add_residual(layer):
+    """
+    Surround a layer/operation with a residual connection, up and down projections,
+    and pre/post-norms.
+    Args:
+        layer (Callable): The layer/operation to modify.
+    Returns:
+        Callable: Another layer/operation that applies the original layer with the
+                above modifications.
+    """
+    def layer_with_residual(dims, x, residual_weights, *args,
+                            use_bias=False, pre_norm=False, post_norm=False, **kwargs):
+        if pre_norm:
+            z = normalize(x)
+        z = affine(x, residual_weights[0], use_bias=use_bias)
+        z = layer(dims, z, *args, **kwargs)
+        if post_norm:
+            z = normalize(z)
+        z = affine(z, residual_weights[1], use_bias=use_bias)
+        return x + z
+    return layer_with_residual
+
+def channel_layer(target_capacity, posterior):
+    """
+    Assume that z comes from some prior distribution, measure the KL divergence to the
+    posterior, and give a sample z from the posterior.
+    Args:
+        target_capacity (Tensor): Rough attempted KL capacity (reparameterized).
+        posterior (tuple[Tensor]): Consists of mean and local_capacity_adjustment. mean
+                parameterizes the mean of the posterior, and local_capacity_adjustment
+                gives the attempted KL capacity to use for each element in the tensor, in
+                log space.
+    """
+    mean, local_capacity_adjustment = posterior
+
+    all_but_last_dim = tuple(range(len(mean.shape)-1))
+    dimensionality = 1  # figure out how many elements there are in the tensor
+    for axis_length in mean.shape:
+        dimensionality *= axis_length
+    min_capacity = 0.5
+    init_capacity = 10000
+    min_capacity = torch.tensor(min_capacity)
+    init_capacity = torch.tensor(init_capacity)
+
+    target_capacity = 10*target_capacity  # this reparameterization is for faster learning
+
+    # Compute some rudimentary post-scaling of z. This output scaling leaks a bit of information that isn't
+    # measured by the KL, but luckily the scaling parameter is one-dimensional and probably doesn't have
+    # that much information in it.
+    # The output is scaled by the sigmoid of a signal-to-noise ratio, where the signal-to-noise ratio is the one
+    # that an AWGN channel would use to achieve a channel capacity equal to the desired_global_capacity below.
+    # A numerically stable formula for the sigmoid of this signal-to-noise ratio is used to compute output_scaling.
+    desired_global_capacity = torch.exp(target_capacity)*init_capacity + min_capacity
+    output_scaling = 1-torch.exp(-desired_global_capacity / dimensionality * 2)
+
+    # We make local adjustments to the desired_global_capacity in order to allow different elements to have
+    # different variances.
+    local_capacity_adjustment = (target_capacity + 
+                                 local_capacity_adjustment - 
+                                 torch.mean(local_capacity_adjustment, dim=all_but_last_dim))
+    desired_local_capacity = torch.exp(local_capacity_adjustment)*init_capacity + min_capacity
+
+    # Figure out what signal-to-noise ratio is required to achieve desired_local_capacity, and compute how much
+    # signal and how much noise for them to sum to one. Numerically stable formulae for these are used below.
+    noise_std = torch.exp(-desired_local_capacity / dimensionality)
+    noise_var = noise_std**2
+    stable_sqrt1memx = lambda x: torch.where(x>20, 1, torch.sqrt(1-torch.exp(-x)))
+    signal_std = stable_sqrt1memx(desired_local_capacity / dimensionality * 2)
+    signal_var = 1-noise_var
+
+    # Don't actually send a signal of variance equal to signal. Instead, normalize the means tensor and send that instead.
+    normalized_mean = mean - torch.mean(mean, dim=all_but_last_dim)
+    normalized_mean = normalized_mean / torch.sqrt(torch.mean(normalized_mean**2+1e-8, dim=all_but_last_dim))
+
+    # Now we can have a sample of z.
+    z = signal_std*normalized_mean + noise_std*torch.randn(normalized_mean.shape)
+    z = output_scaling*z  # leaks a tiny bit of unmeasured information, see comment above
+
+    # Calculate the KL directly instead of using the AWGN channel capacity formula, because we didn't
+    # actually send a signal of variance equal to signal, so the AWGN channel capacity formula would be wrong
+    # here.
+    KL = 0.5*(noise_var + signal_var*normalized_mean**2 - 1) + desired_local_capacity/dimensionality
+    return z, KL
+
+def decode_latents(target_capacities, decode_weights, multiposteriors):
+    """
+    Decode the latents z, and give the KL loss for the VAE-like setup. Break the KL down into
+    its components for possible analysis later. Apply a linear layer afterwards.
+    Args:
+        target_capacities (MultiTensor[Tensor]): Rough attempted KL capacities (reparameterized).
+        decode_weights (MultiTensor[list[Tensor]]): A set of linear layer weights to apply to the decoded
+                outputs for every tensor in the multitensor output of the decoding layer.
+        multiposteriors (MultiTensor[tuple[Tensor]]): Consists of mean and local_capacity_adjustment. mean
+                parameterizes the mean of the posterior, and local_capacity_adjustment
+                gives the attempted KL capacity to use for each element in the tensor, in
+                log space. One (mean, local_capacity_adjustment) tuple for every tensor in the multitensor
+                system.
+    Returns:
+        MultiTensor[Tensor]: The output of the decoding layer.
+        list[Tensor]: Individual KL components that contribute to the total KL.
+        list[str]: Names for individual KL components contributing to the total KL.
+    """
+
+    KL_amounts = []
+    KL_names = []
+
+    @multitensor_systems.multify
+    def decode_latents_(dims, target_capacity, decode_weight, posterior):
+        z, KL = channel_layer(target_capacity, posterior)
+        x = affine(z, decode_weight, use_bias=True)
+        KL_amounts.append(KL)
+        KL_names.append(str(dims))
+        return x
+    x = decode_latents_(target_capacities, decode_weights, multiposteriors)
+    return x, KL_amounts, KL_names
+
+
+def share_direction(residual, share_weights, direction):
+    """
+    Apply the multitensor communication layer.
+    Args:
+        residual (MultiTensor[Tensor]): The residual stream.
+        share_weights (Multitensor[list[list[Tensor]]]): Multiresidual projection weights.
+        direction (int): 1 for up, -1 for down.
+    Returns:
+        MultiTensor[Tensor]: The output of the multitensor communication layer.
+    """
+    
+    # Split the multiresidual into two multilinears
+    down_project_weights = multitensor_systems.multify(lambda dims, weights: weights[0])(share_weights)
+    up_project_weights = multitensor_systems.multify(lambda dims, weights: weights[1])(share_weights)
+
+    multitensor_system = residual.multitensor_system
+
+    x = affine(residual, down_project_weights, use_bias=False)  # down-project
+
+    # Define a different communication method depending on which way we're communicating.
+    if direction == 1:  # share up
+        def share(dims, _):
+            lower_xs = []
+            for lower_dims in multitensor_system:  # get information from all lower tensors
+                # check that lower_dims lower than dims in all indices
+                if all([lower_naxes <= naxes for lower_naxes, naxes in zip(lower_dims, dims)]):
+                    lower_x = x[lower_dims]
+                    # unsqueeze all the dimensions of lower_x until it's the same rank as x
+                    for dim, (lower_naxes, naxes) in enumerate(zip(lower_dims, dims)):
+                        if lower_naxes < naxes:
+                            axis = sum(dims[:dim], 0)
+                            lower_x = torch.unsqueeze(lower_x, axis)
+                    lower_xs.append(lower_x)
+            return sum(lower_xs)
+    else:  # share down
+        def share(dims, _):
+            higher_xs = []
+            for higher_dims in multitensor_system:  # get information from all higher tensors
+                # check that higher_dims higher than dims in all indices
+                if all([higher_naxes >= naxes for higher_naxes, naxes in zip(higher_dims, dims)]):
+                    higher_x = x[higher_dims]
+                    # aggregate all the dimensions of higher_x until it's the same rank as x
+                    for dim, (higher_naxes, naxes) in reversed(list(enumerate(zip(higher_dims, dims)))):
+                        if higher_naxes > naxes:
+                            axis = sum(higher_dims[:dim], 0)
+                            if (x.multitensor_system.task.in_out_same_size or x.multitensor_system.task.all_out_same_size) and dim==3:  # be careful aggregating the x axis
+                                # expand/contract masks to make the dims the same as higher_x
+                                masks = x.multitensor_system.task.masks
+                                masks = 1-(1-masks[...,0])*(1-masks[...,1])
+                                for i in range(sum(higher_dims[1:3])):  # insert color and direction dims
+                                    masks = masks[:,None,...]
+                                if dims[4] == 0:  # remove y dim
+                                    masks = masks[...,0]
+                                masks = masks[...,None]  # add channel dim
+                                higher_x = torch.sum(higher_x*masks, dim=axis) / (torch.sum(masks, dim=axis)+1e-4)
+                            elif (x.multitensor_system.task.in_out_same_size or x.multitensor_system.task.all_out_same_size) and dim==4:  # be careful aggregating the y axis
+                                # expand/contract masks to make the dims the same as higher_x
+                                masks = x.multitensor_system.task.masks
+                                masks = 1-(1-masks[...,0])*(1-masks[...,1])
+                                for i in range(sum(higher_dims[1:3])):  # insert color and direction dims
+                                    masks = masks[:,None,...]
+                                if higher_dims[3] == 0:  # remove x dim
+                                    masks = masks[...,0,:]
+                                masks = masks[...,None]  # add channel dim
+                                higher_x = torch.sum(higher_x*masks, dim=axis) / (torch.sum(masks, dim=axis)+1e-4)
+                            else:
+                                higher_x = torch.mean(higher_x, dim=axis)
+                    higher_xs.append(higher_x)
+            return sum(higher_xs)
+    x = multitensor_systems.multify(share)(x)  # perform the cross-tensor communication
+    x = normalize(x)  # post-norm
+    x = affine(x, up_project_weights, use_bias=False)  # up-project
+    residual = multitensor_systems.multify(lambda dims, x, y: x+y)(residual, x)  # add residual
+    return residual
+
+def share_up(residual, share_up_weights):
+    """
+    Apply the multitensor communication layer, upwards.
+    Args:
+        residual (MultiTensor[Tensor]): The residual stream.
+        share_up_weights (Multitensor[list[list[Tensor]]]): Multiresidual projection weights.
+    Returns:
+        MultiTensor[Tensor]: The output of the multitensor communication layer.
+    """
+    return share_direction(residual, share_up_weights, 1)
+
+def share_down(residual, share_down_weights):
+    """
+    Apply the multitensor communication layer, downwards.
+    Args:
+        residual (MultiTensor[Tensor]): The residual stream.
+        share_down_weights (Multitensor[list[list[Tensor]]]): Multiresidual projection weights.
+    Returns:
+        MultiTensor[Tensor]: The output of the multitensor communication layer.
+    """
+    return share_direction(residual, share_down_weights, -1)
+
+
+def only_do_for_certain_shapes(*shapes):
+    """
+    Decorator which takes a function that is applied to every tensor in a multitensor,
+    and replaces that function with the identity for select tensors in the multitensor.
+    Args:
+        *shapes (list[list[int]]): A list of MultiTensor dims, for which the function
+                should be applied. Don't do the function if the dims for the tensor isn't
+                in the list.
+    """
+    def decorator(fn):
+        def filtered_fn(dims, x, *args, **kwargs):
+            if tuple(dims) in shapes:
+                return fn(dims, x, *args, **kwargs)
+            else:
+                return x
+        return filtered_fn
+    return decorator
+
+
+@multitensor_systems.multify
+@add_residual
+def softmax(dims, x):
+    """
+    Apply the softmax layer. Take softmax over all combinations of dims, but never include
+    the channel dim nor the example dim.
+    Args:
+        dims (list[int]): Ignore this argument. It will be filled in by the multify decorator.
+        x (MultiTensor[Tensor]): The input to the softmax layer.
+    Returns:
+        MultiTensor[Tensor]: The output of the softmax layer.
+    """
+    axes = list(range(sum(dims)))
+    if dims[0]==1:
+        axes.pop(0)  # don't softmax over examples
+    subsets_of_axes = []
+    for subset_size in range(1, len(axes)+1):
+        subsets_of_axes = subsets_of_axes + list(itertools.combinations(axes, subset_size))
+    softmaxxes = []
+    for subset in subsets_of_axes:
+        offsets = torch.amax(x, dim=subset, keepdim=True)
+        softmax = torch.exp(x-offsets)
+        softmax = softmax / torch.sum(softmax, dim=subset, keepdim=True)
+        softmaxxes.append(softmax)
+    return torch.cat(softmaxxes, dim=-1)
+
+
+def make_directional_layer(fn, diagonal_fn):
+    """
+    Take a directional function (one version made for cardinal directions and another for diagonal)
+    and use it to create a directional layer that works on tensors that have a direction
+    dimension.
+    Args:
+        fn (Callable): A directional function that takes a tensor and a dim argument.
+        diagonal_fn (Callable): A directional function that takes a tensor and two dim arguments.
+    Returns:
+        Callable: A function that takes a tensor with a direction dimension and applies fn and
+                diagonal_fn in a different direction for each slice of the tensor along the
+                direction dimension.
+    """
+    def directional_layer(dims, x, masks):
+        """
+        Args:
+            dims (list[int]): Ignore this argument. It will be filled in by the multify decorator.
+            x (MultiTensor[Tensor]): The input to the directional layer.
+            masks (Tensor): A (example, x, y, in/out) tensor of zeros and ones telling you which pixels are in-bounds.
+        Returns:
+            MultiTensor[Tensor]: The output of the directional layer.
+        """
+
+        # rearrange mask to fit same shape as x
+        masks = 1-(1-masks[...,0])*(1-masks[...,1])
+        if dims[4]==0:
+            masks = masks[:,:,0]
+        if dims[3]==0:
+            masks = masks[:,0,...]
+        for i in range(sum(dims[1:3])):
+            masks = masks[:,None,...]
+        masks = masks[...,None]
+        # mask out x
+        x = x*masks
+
+        # figure out which dimension the direction dimension is
+        n_directions = dims[3]+dims[4]
+        direction_dim = sum(dims[:2])
+
+        # make a default output tensor in case we try to do cumulative ops on a dimension that
+        # is not present in the tensor x
+        zero_tensor = torch.zeros_like(torch.select(x, direction_dim, 0))
+
+        # split the channel dimension into two.
+        # split the direction dimension into two.
+        # for each half of the direction dimension, each index of the direction dimension corresponds
+        # to either x or y, and we accumulate in those respective dimensions.
+        # do the other half of the channel dimension in the reverse direction.
+        # do the other half of the direction dimension in the reverse direction.
+        result_tensors = []
+        for channel_split in range(2):  # forward, backward
+            result_list = []
+            for direction_split in range(2):  # forward, backward
+                for direction_ind in range(4):  # x, x+y, y, y-x
+                    if direction_ind % 2 == 0:  # cardinal direction
+                        cardinal_direction_ind = int(direction_ind//2)
+                        if dims[3+cardinal_direction_ind]>0:
+                            x_slice = torch.select(x, direction_dim, 4*direction_split+direction_ind)
+                            x_slice = x_slice[...,channel_split::2]
+                            masks_flipped = torch.select(masks, direction_dim, 0)
+                            if direction_split + channel_split == 1:
+                                # below: decrement index to account for slicing, increment index to go from direction to x
+                                x_slice = torch.flip(x_slice, [direction_dim+cardinal_direction_ind])
+                                masks_flipped = torch.flip(masks_flipped, [direction_dim+cardinal_direction_ind])
+                            result = fn(x_slice, direction_dim+cardinal_direction_ind, masks_flipped)
+                            if direction_split + channel_split == 1:
+                                result = torch.flip(result, [direction_dim+cardinal_direction_ind])
+                        else:
+                            result = zero_tensor
+                    else:  # diagonal direction
+                        if dims[3] == 1 and dims[4] == 1:
+                            diagonal_direction_ind = int(direction_ind//2)  # 0 for x+y, 1 for y-x
+                            x_slice = torch.select(x, direction_dim, 4*direction_split+direction_ind)
+                            x_slice = x_slice[...,channel_split::2]
+                            masks_flipped = torch.select(masks, direction_dim, 0)
+                            if (direction_split + channel_split + diagonal_direction_ind) % 2 == 1:
+                                # below: decrement index to account for slicing, increment index to go from direction to x
+                                x_slice = torch.flip(x_slice, [direction_dim])
+                                masks_flipped = torch.flip(masks_flipped, [direction_dim])
+                            if direction_split + channel_split == 1:
+                                x_slice = torch.flip(x_slice, [direction_dim+1])
+                                masks_flipped = torch.flip(masks_flipped, [direction_dim+1])
+                            result = diagonal_fn(x_slice, direction_dim, direction_dim+1, masks_flipped)
+                            if (direction_split + channel_split + diagonal_direction_ind) % 2 == 1:
+                                result = torch.flip(result, [direction_dim])
+                            if direction_split + channel_split == 1:
+                                result = torch.flip(result, [direction_dim+1])
+                        else:
+                            result = zero_tensor
+                    result_list.append(result)
+            result_list = torch.stack(result_list, dim=direction_dim)  # stack direction dim together
+            result_tensors.append(result_list)
+        return torch.cat(result_tensors, dim=-1)  # cat channel dim together
+    return directional_layer
+
+"""
+Function cummax
+
+Apply the directional cummax layer.
+Args:
+    x (MultiTensor[Tensor]): The input to the cummax layer.
+    weights (MultiTensor[list[list[Tensor]]]): Multiresidual projection weights surrounding the cummax operations.
+            Implicitly introduced by the add_residual decorator.
+    masks (Tensor): A (example, x, y, in/out) tensor of zeros and ones telling you which pixels are in-bounds.
+    Other boolean kwargs such as pre_norm, post_norm, use_bias, introduced by the add_residual decorator.
+Returns:
+    MultiTensor[Tensor]: The output of the cummax layer.
+"""
+def cummax_(x, dim, masks):
+    masks = 1e3*(1-masks)
+    max_ = torch.max(x-masks, dim=dim, keepdim=True)[0] + masks + 1e-3
+    min_ = torch.min(x+masks, dim=dim, keepdim=True)[0] - masks - 1e-3
+    x = torch.cummax(x-masks, dim=dim)[0] + masks
+    return (x - min_) / (max_-min_) * 2 - 1
+def diagonal_cummax_(x, dim1, dim2, masks):
+    masks_ = 1e3*(1-masks)
+    min_dim = min(x.shape[dim1], x.shape[dim2])
+    n_iters = int(np.ceil(np.log2(min_dim)))
+    # compute the cummax and max via forward+backward associative scan
+    max_x = x - masks_
+    for sign in (1, -1):
+        for i in range(n_iters):
+            shift_amount = sign*2**i
+            shifted_x = diagonal_shift_(max_x, dim1, dim2, masks_, shift_amount=shift_amount, pad_value=-1e3)
+            max_x = torch.max(max_x, shifted_x)
+        if sign == 1:  # save the cummax after the forward associative scan
+            cummax_x = max_x + masks_
+    max_x = max_x + masks_
+    # compute the min via forward+backward associative scan
+    min_x = x + masks_
+    for sign in (1, -1):
+        for i in range(n_iters):
+            shift_amount = sign*2**i
+            shifted_x = diagonal_shift_(min_x, dim1, dim2, masks_, shift_amount=shift_amount, pad_value=1e3)
+            min_x = torch.min(min_x, shifted_x)
+    min_x = min_x - masks_
+    return ((cummax_x - min_x) / (max_x-min_x+1e-5) * 2 - 1)*masks  # rescale the cummax to fit the max and min
+cummax = multitensor_systems.multify(  # apply decorators
+         only_do_for_certain_shapes((1,1,1,1,1), (1,0,1,1,1))(
+         add_residual(
+         make_directional_layer(
+         cummax_, diagonal_cummax_
+         ))))
+
+"""
+Function shift
+
+Apply the directional shift layer.
+Args:
+    x (MultiTensor[Tensor]): The input to the shift layer.
+    weights (MultiTensor[list[list[Tensor]]]): Multiresidual projection weights surrounding the shift operations.
+            Implicitly introduced by the add_residual decorator.
+    masks (Tensor): A (example, x, y, in/out) tensor of zeros and ones telling you which pixels are in-bounds.
+    Other boolean kwargs such as pre_norm, post_norm, use_bias, introduced by the add_residual decorator.
+Returns:
+    MultiTensor[Tensor]: The output of the shift layer.
+"""
+def shift_(x, dim, masks):
+    padding = torch.zeros_like(torch.narrow(x, dim, 0, 1))
+    narrowed = torch.narrow(x, dim, 0, x.shape[dim]-1)
+    return torch.cat([padding, narrowed], dim=dim)
+def diagonal_shift_(x, dim1, dim2, masks, shift_amount=1, pad_value=0):
+    for dim in (dim1, dim2):
+        padding = pad_value+torch.zeros_like(torch.narrow(x, dim, 0, abs(shift_amount)))
+        if shift_amount >= 0:
+            narrowed = torch.narrow(x, dim, 0, x.shape[dim]-shift_amount)
+            x = torch.cat([padding, narrowed], dim=dim)
+        else:
+            narrowed = torch.narrow(x, dim, -shift_amount, x.shape[dim]+shift_amount)
+            x = torch.cat([narrowed, padding], dim=dim)
+    return x
+shift = multitensor_systems.multify(  # apply decorators
+        only_do_for_certain_shapes((1,1,1,1,1), (1,0,1,1,1))(
+        add_residual(
+        make_directional_layer(
+        shift_, diagonal_shift_
+        ))))
+
+directional_dims = [(i,j,1,k,l) for i in range(2) for j in range(2) for k in range(2) for l in range(2)]
+@multitensor_systems.multify
+@only_do_for_certain_shapes(*directional_dims)
+def direction_share(dims, x, weights, pre_norm=True, use_bias=False):
+    """
+    Apply the directional communication layer.
+    Args:
+        dims (list[int]): Ignore this argument. It will be filled in by the multify decorator.
+        x (MultiTensor[Tensor]): The input to the directional communication layer.
+        weights (MultiTensor[list[list[list[Tensor]]]]): A multitensor full of linear layer weights
+                for every pair of directions.
+    Returns:
+        MultiTensor[Tensor]: The output of the directional communication layer.
+    """
+    # Optionally normalize the input
+    z = normalize(x) if pre_norm else x
+
+    n_directions = dims[3] + dims[4]
+    direction_dim = -2 - n_directions
+
+    # Unbind x and z along the direction dimension to avoid repeated slicing.
+    x_list = list(torch.unbind(x, dim=direction_dim))
+    z_list = list(torch.unbind(z, dim=direction_dim))
+
+    # Precomputed coefficients for the directional shift.
+    coefficients = [1, 0.2, 0.4, 0.2, 1, 0.2, 0.4, 0.2]
+
+    # Loop over all pairs of directions.
+    for d1 in range(8):
+        for d2 in range(8):
+            # Determine the appropriate coefficient.
+            c = coefficients[(d2 - d1) % 8]
+            # Apply the affine transformation for this pair and accumulate.
+            x_list[d1] = x_list[d1] + c * affine(z_list[d2], weights[d1][d2], use_bias=use_bias)
+
+    # Reassemble the tensor along the original direction dimension.
+    return torch.stack(x_list, dim=direction_dim)
+
+@multitensor_systems.multify
+@add_residual
+def nonlinear(dims, x):
+    """
+    Apply the nonlinear layer.
+    Args:
+        dims (list[int]): Ignore this argument. It will be filled in by the multify decorator.
+        x (MultiTensor[Tensor]): The input to the nonlinear layer.
+        weights (MultiTensor[list[list[Tensor]]]): Multiresidual projection weights surrounding the nonlinear operations.
+                Implicitly introduced by the add_residual decorator.
+        Other boolean kwargs such as pre_norm, post_norm, use_bias, introduced by the add_residual decorator.
+    Returns:
+        MultiTensor[Tensor]: The output of the nonlinear layer.
+    """
+    return torch.nn.functional.silu(x)
+
+def postprocess_mask(task, x_mask, y_mask):
+    """
+    Apply postprocessing to the masks outputted by the network. If masks are already determined
+    by the task because the output shapes follow a known hardcoded structure, then enforce the
+    known structure.
+    Args:
+        task (Task): The task that is being solved by the network.
+        x_mask (Tensor): The x mask that is outputted by the network that we must modify to fit
+                the task's structure.
+        y_mask (Tensor): The y mask that is outputted by the network that we must modify to fit
+                the task's structure.
+    Returns:
+        Tensor: Modified x mask that fits the task's structure.
+        Tensor: Modified y mask that fits the task's structure.
+    """
+
+    # Make an additive modifier mask that has large negative values for out of bounds pixels.
+    x_mask_modifier = np.zeros([task.n_examples, task.n_x, 2])
+    y_mask_modifier = np.zeros([task.n_examples, task.n_y, 2])
+    for example_num in range(task.n_examples):
+        max_length = max(task.shapes[example_num][0][0], task.shapes[example_num][1][0])
+        for in_out_mode in range(2):
+            x_mask_modifier[example_num,max_length:,in_out_mode] = -1000
+        max_length = max(task.shapes[example_num][0][1], task.shapes[example_num][1][1])
+        for in_out_mode in range(2):
+            y_mask_modifier[example_num,max_length:,in_out_mode] = -1000
+    x_mask = x_mask+torch.from_numpy(x_mask_modifier).to(x_mask.device).to(x_mask.dtype)
+    y_mask = y_mask+torch.from_numpy(y_mask_modifier).to(y_mask.device).to(y_mask.dtype)
+    return x_mask, y_mask
+</file>
+
+<file path="README.md">
+<a href="https://iliao2345.github.io/blog_posts/arc_agi_without_pretraining/arc_agi_without_pretraining.html"><img src="teaser_figure_w_title.png"></a>
+This is the code base for the [ARC-AGI Without Pretraining](https://iliao2345.github.io/blog_posts/arc_agi_without_pretraining/arc_agi_without_pretraining.html) project. The Kaggle competition template version can be found [here](https://www.kaggle.com/code/iliao2345/arc-agi-without-pretraining/notebook?scriptVersionId=232760209).
+
+# Installation
+
+```
+> git clone https://github.com/iliao2345/CompressARC.git
+> cd CompressARC
+> python -m venv arc_agi_without_pretraining
+> source arc_agi_without_pretraining/bin/activate
+> pip install -r requirements.txt
+```
+
+# How to solve an ARC-AGI task
+
+Run `analyze_example.py` to initialize a new model and train from scratch:
+```
+> python analyze_example.py
+Enter which split you want to find the task in (training, evaluation, test): <split>
+Enter which task you want to analyze (eg. 272f95fa): <task>
+Performing a training run on task <task> and placing the results in <task>/
+|100%|███████████████████████████████████████████████| 1500/1500 [12:22<00:00, 2.01it/s]
+done
+```
+
+The code will create a folder `<task>/` and put plots there after 1500 steps of training:
+- solutions at every 50 steps
+- interpretable tensors of task representations
+- graph of each tensor's contribution to the KL over time
+- graph of the KL vs reconstruction error over time
+
+Most tasks may take up to 20 minutes to run, on one NVIDIA GeForce RTX 4070 GPU.
+
+
+# Tips for Reading the Code
+
+A basic description of the code files in this repo:
+
+**For running via command line:**
+- `analyze_example.py`: Demonstrates how to solve one ARC-AGI problem using our method, with visualizations of learned task representations and plots of metrics.
+- `plot_problems.py`: Plots all of the ARC-AGI problems in a split.
+- `plot_accuracy.py`: Plots pass@n accuracies during/after a bulk training run with `train.py`.
+- `train.py`: Trains a model for every task in a split, plotting the accuracy. Contains code that computes the loss function. Defaults to the training split.
+- `parallel_train.py`: A multiprocessing program that schedules as many puzzles as possible in a split to be solved at the same time through `solve_task.py`, while maximizing the GPU memory usage. Defaults to the training split.
+- `scoring.py`: A script for scoring the results of `parallel_train.py`, which are better-formatted for Kaggle submissions.
+
+**Functionality, not for running via command line:**
+- `arc_compressor.py`: The network architecture and forward pass.
+- `initializers.py`: Model initialization, and handling of equivariances via weight tying.
+- `layers.py`: Implementation of individual layers in the forward pass.
+- `multitensor_systems.py`: Handling multitensors.
+- `preprocessing.py`: Converting the dataset into a form usable by the repo.
+- `solution_selection.py`: Logging metrics and converting model outputs into solution predictions.
+- `visualization.py`: Drawing problems and solutions.
+- `solve_task.py`: A job script to solve one ARC-AGI problem on a specified GPU.
+
+**Some classes that the repo defines and uses:**
+- `MultiTensorSystem` (in `multitensor_systems.py`): A class that can spawn MultiTensors using stored dimensional information.
+- `MultiTensor` (in `multitensor_systems.py`): Container class for groups of tensors.
+- `Logger` (in `solution_selection.py`): For postprocessing of solutions outputted by the model, and their collection over time during training.
+- `Task` (in `preprocessing.py`): Contains information about an ARC-AGI task, such as grid dimensions and masks, pixel colors, etc.
+- `ARCCompressor` (in `arc_compressor.py`): Model class, with forward pass.
+- `Initializer` (in `initializers.py`): For initializing model weights.
+
+**Some repo-specific language that we use for variable naming, etc.**
+- `dims` refers to a length 5 list of zeros and ones, and refers to the presence/absence of each of the five multitensor dimensions $(example, color, direction, height, width)$. Channel dimension is implicitly included.
+- `axis` always refers to the index of some dim in a tensor. For example, in a $(example, color, height)$ tensor, the $height$ dim is the 2nd axis, whereas for the $(height, width)$ tensor, it is the 0th axis.
+- This repo uses `x` and `y` to refer to the $height$ and $width$ dimensions, respectively.
+- The `@multitensor_systems.multify` decorator takes a function and modifies it to apply it once for every tensor in a multitensor. If the input is a tensor/object, then the new input is now a multitensor/multiobject. The function must be written with additional parameter `dims`.
+- The `@layers.add_residual` decorator takes a function and creates a residual connection around it, with projections to/from the input/output of the function and the residual stream. Optional parameters are added for using biases for the projections, using pre-norm, and post-norm.
+- The `@layers.only_do_for_certain_shapes(*shapes)` decorator takes a function with `dims` as its first input, and applies the function only if `dims` is in `shapes`. Else, it applies the identity function. Useful for chaining with the `@multitensor_systems.multify` decorator.
+
+Code for different files may be written in slightly different styles due to polishing of individual code files by ChatGPT.
+
+
+# Citation
+
+If you'd like to cite this blog post, use the following entry:
+```
+@online{liao2025arcagiwithoutpretraining,
+	author = {Isaac Liao and Albert Gu},
+	title = {ARC-AGI Without Pretraining},
+	year = {2025},
+	url = {https://iliao2345.github.io/blog_posts/arc_agi_without_pretraining/arc_agi_without_pretraining.html},
+}
+```
+</file>
+
+</files>
