@@ -1,5 +1,9 @@
+import argparse
 import os
 import pickle
+from pathlib import Path
+from typing import Dict, Optional, Tuple
+
 from tqdm import tqdm
 
 import numpy as np
@@ -35,13 +39,126 @@ torch.manual_seed(0)
 torch.set_default_dtype(torch.float32)
 torch.set_default_device('cuda')
 
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+CHECKPOINT_SUBPATH = Path("checkpoints/latent_test_holdout_multitask/dcgru/dngpu_best.pt")
+
+
+def _resolve_default_checkpoint() -> Optional[Path]:
+    """Search common locations for the pretrained CellGRU checkpoint."""
+    roots = [SCRIPT_DIR]
+    parents = list(SCRIPT_DIR.parents)
+    roots.extend(parents[:4])
+    for parent in parents[:4]:
+        roots.append(parent / "arc-cellgru")
+
+    seen = set()
+    for root in roots:
+        root = root.resolve()
+        if root in seen:
+            continue
+        seen.add(root)
+        candidate = root / CHECKPOINT_SUBPATH
+        if candidate.exists():
+            return candidate
+    return None
+
+
+DEFAULT_CHECKPOINT = _resolve_default_checkpoint()
+
+
+def _clean_state_dict(state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Remove torch.compile artefact prefixes from checkpoint keys."""
+    cleaned: Dict[str, torch.Tensor] = {}
+    for key, value in state.items():
+        new_key = key.replace("._orig_mod.", ".")
+        cleaned[new_key] = value
+    return cleaned
+
+
+def _load_cellgru_state(path: Path) -> Tuple[Dict[str, torch.Tensor], Dict[str, object]]:
+    ckpt = torch.load(path, map_location="cpu")
+    state = _clean_state_dict(ckpt["model_state"])
+    args = ckpt.get("args", {})
+    return state, args
+
+
+def _remap_checkpoint_vocab(state: Dict[str, torch.Tensor], task, target_vocab: int) -> Dict[str, torch.Tensor]:
+    """Align checkpoint vocab channels to the task-local token order."""
+    state = dict(state)  # shallow copy
+
+    def _build_mapping() -> Tuple[int, ...]:
+        # Token 0 reserved for padding; subsequent tokens follow task.colors order.
+        mapping = [0]
+        for color in task.colors:
+            mapping.append(int(color) + 1)
+        return tuple(mapping[:target_vocab])
+
+    if "input_layer.weight" not in state or "output_layer.weight" not in state:
+        return state
+
+    mapping = _build_mapping()
+    ckpt_vocab = state["input_layer.weight"].shape[1]
+    if ckpt_vocab == target_vocab:
+        return state
+
+    weight = state["input_layer.weight"]
+    new_weight = weight.new_zeros(weight.shape[0], target_vocab, 1, 1)
+    for idx, src_idx in enumerate(mapping):
+        if src_idx < ckpt_vocab:
+            new_weight[:, idx, :, :] = weight[:, src_idx, :, :]
+    state["input_layer.weight"] = new_weight
+
+    if "output_layer.weight" in state:
+        out_w = state["output_layer.weight"]
+        new_out_w = out_w.new_zeros(target_vocab, out_w.shape[1], 1, 1)
+        for idx, src_idx in enumerate(mapping):
+            if src_idx < out_w.shape[0]:
+                new_out_w[idx, :, :, :] = out_w[src_idx, :, :, :]
+        state["output_layer.weight"] = new_out_w
+
+    if "output_layer.bias" in state:
+        out_b = state["output_layer.bias"]
+        new_out_b = out_b.new_zeros(target_vocab)
+        for idx, src_idx in enumerate(mapping):
+            if src_idx < out_b.shape[0]:
+                new_out_b[idx] = out_b[src_idx]
+        state["output_layer.bias"] = new_out_b
+
+    return state
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train ARCCompressor on a single ARC task and visualize progress.")
+    parser.add_argument("--split", type=str, default=None,
+                        help="Dataset split to use (training/evaluation/test). Defaults to prompting.")
+    parser.add_argument("--task", type=str, default=None,
+                        help="Task ID hash (e.g. 272f95fa). Defaults to prompting.")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to pretrained CellGRU checkpoint. Use 'default' to load the bundled checkpoint."
+                             " If omitted you will be prompted.")
+    parser.add_argument("--steps", type=int, default=1500,
+                        help="Number of training iterations to run (default: 1500).")
+    parser.add_argument("--plot-interval", type=int, default=50,
+                        help="Draw solution snapshots every N steps (default: 50).")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Directory to store outputs. Defaults to <task>/ under the current directory.")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = parse_args()
 
     # Some interesting tasks: 272f95fa, 6d75e8bb, 6cdd2623, 41e4d17e, 2bee17df
     # 228f6490, 508bd3b6, 2281f1f4, ecdecbb3
-    split = input('Enter which split you want to find the task in (training, evaluation, test): ')
-    task_name = input('Enter which task you want to analyze (eg. 272f95fa): ')
-    folder = task_name + '/'
+    split = args.split or input('Enter which split you want to find the task in (training, evaluation, test): ')
+    task_name = args.task or input('Enter which task you want to analyze (eg. 272f95fa): ')
+
+    if args.output_dir:
+        out_dir = Path(args.output_dir).expanduser().resolve()
+    else:
+        out_dir = Path(task_name)
+    folder = str(out_dir) + '/'
     print('Performing a training run on task', task_name,
           'and placing the results in', folder)
     os.makedirs(folder, exist_ok=True)
@@ -49,17 +166,66 @@ if __name__ == "__main__":
     # Preprocess the task, set up the training
     task = preprocessing.preprocess_tasks(split, [task_name])[0]
     model = arc_compressor.ARCCompressor(task)
+
+    if args.checkpoint is not None:
+        ckpt_input = args.checkpoint.strip()
+    else:
+        ckpt_input = input(
+            "Enter CellGRU checkpoint path to preload (blank to skip, 'default' for pretrained): "
+        ).strip()
+    checkpoint_path: Optional[Path] = None
+    if ckpt_input:
+        if ckpt_input.lower() in {"default", "d"}:
+            if DEFAULT_CHECKPOINT is not None:
+                checkpoint_path = DEFAULT_CHECKPOINT
+                print(f"Using default checkpoint at {checkpoint_path}")
+            else:
+                print("Default checkpoint not found; continuing without preload.")
+        else:
+            checkpoint_path = Path(ckpt_input).expanduser().resolve()
+            if not checkpoint_path.exists():
+                print(f"Checkpoint {checkpoint_path} not found; continuing without preload.")
+                checkpoint_path = None
+
+    if checkpoint_path is not None:
+        try:
+            state_dict, train_args = _load_cellgru_state(checkpoint_path)
+            state_dict = _remap_checkpoint_vocab(state_dict, task, model.n_vocab)
+            net_state = model.net.state_dict()
+            filtered_state = {k: v for k, v in state_dict.items() if k in net_state}
+            missing_keys = [k for k in net_state if k not in state_dict]
+            unexpected_keys = [k for k in state_dict if k not in net_state]
+            load_result = model.net.load_state_dict(filtered_state, strict=False)
+            if load_result.missing_keys:
+                missing_keys.extend(load_result.missing_keys)
+            if load_result.unexpected_keys:
+                unexpected_keys.extend(load_result.unexpected_keys)
+            print(f"Loaded pretrained CellGRU weights from {checkpoint_path}.")
+            param_millions = sum(p.numel() for p in model.net.parameters()) / 1e6
+            print(f"Model size: {param_millions:.2f}M parameters")
+            if missing_keys:
+                print("Missing keys (ignored):", missing_keys)
+            if unexpected_keys:
+                print("Unexpected keys (ignored):", unexpected_keys)
+
+            default_steps = int(train_args.get("steps", train_args.get("dngpu_steps", model.steps)))
+            model.steps = default_steps
+            print(f"Default recurrent steps from checkpoint: {default_steps}")
+        except Exception as exc:
+            print(f"Failed to load checkpoint {checkpoint_path}: {exc}")
+
     optimizer = torch.optim.Adam(model.weights_list, lr=3e-4)  # betas default are fine
     train_history_logger = solution_selection.Logger(task)
     visualization.plot_problem(train_history_logger)
 
-    # Perform training for 1500 iterations
-    n_iterations = 1500
+    # Perform training for the requested number of iterations
+    plot_interval = max(1, int(args.plot_interval))
+    n_iterations = max(1, int(args.steps))
     for train_step in tqdm(range(n_iterations)):
         train.take_step(task, model, optimizer, train_step, train_history_logger)
         
-        # Plot solutions every 50 steps
-        if (train_step+1) % 50 == 0:
+        # Plot solutions periodically
+        if (train_step + 1) % plot_interval == 0:
             visualization.plot_solution(train_history_logger,
                 fname=folder + task_name + '_at_' + str(train_step+1) + ' steps.png')
             visualization.plot_solution(train_history_logger,

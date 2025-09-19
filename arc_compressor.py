@@ -26,7 +26,7 @@ class ARCCompressor:
         self,
         task,
         steps: int = 16,
-        units: int = 128,
+        units: int = 256,
         kernel: int = 3,
         neighborhood: str = "moore",
         cell_type: str = "dcgru",
@@ -39,20 +39,40 @@ class ARCCompressor:
         mixer_depth: int = 4,
         mixer_pool_stride: int = 2,
         toroidal: bool = False,
-        conditioning: str = "none",
+        conditioning: str = "controller",
         force_input_plane: bool = False,
         input_plane_index: int = 0,
         vae_latent_dim: int = 128,
         factor_rank: int = 32,
+        global_vocab: int = 11,
+        task_latent_dim: int = 256,
+        task_latent_tokens: int = 2,
+        task_latent_use_film: bool = False,
+        controller_depth: int = 4,
+        controller_heads: int = 8,
+        controller_tokens: int = 16,
+        controller_scratch: int = 64,
+        controller_pool_stride: int = 1,
+        controller_update_every: int = 2,
+        controller_enable_film: bool = True,
     ):
         self.task = task
         self.steps = int(steps)
 
-        # Task-local vocabulary:
-        #   pad=0     (OOB canvas)
-        #   colors=[0..n_colors] shifted by +1 -> tokens 1..(n_colors+1)
-        # NOTE: task.n_colors excludes black; len(task.colors) == n_colors+1 (includes black=0)
-        self.n_vocab = len(task.colors) + 1  # + pad
+        # Global vocabulary used by the pretrained CellGRU (pad + 10 ARC colors)
+        self.n_vocab = int(global_vocab)
+
+        # Task-local palette bookkeeping so we can map logits back to the specific colors present
+        self.local_colors = list(task.colors)
+        self.local_colors_no_black = [c for c in self.local_colors if c != 0]
+        self.local_n_colors = len(self.local_colors_no_black)
+        self.local_channel_indices = torch.tensor(
+            [c - 1 for c in self.local_colors_no_black], dtype=torch.long
+        )
+
+        self.global_colors = list(range(self.n_vocab - 1))  # actual ARC color ids (0..n_vocab-2)
+        self.global_non_black_colors = [c for c in self.global_colors if c != 0]
+        self.global_non_black_count = len(self.global_non_black_colors)
 
         # A plain DCGRU2D model with no controller/prompt bells & whistles
         self.net = CellGRU(
@@ -74,11 +94,34 @@ class ARCCompressor:
             mixer_pool_stride=mixer_pool_stride,
             force_input_plane=force_input_plane,
             input_plane_index=input_plane_index,
+            task_latent_dim=task_latent_dim,
+            task_latent_tokens=task_latent_tokens,
+            task_latent_use_film=task_latent_use_film,
+            controller_depth=controller_depth,
+            controller_heads=controller_heads,
+            controller_tokens=controller_tokens,
+            controller_scratch=controller_scratch,
+            controller_pool_stride=controller_pool_stride,
+            controller_update_every=controller_update_every,
+            controller_enable_film=controller_enable_film,
         )
+
+        if hasattr(self.net, "task_bank") and self.net.task_bank is not None:
+            task_id = str(self.task.task_name)
+            if task_id not in self.net.task_bank.codes:
+                latent_dim = self.net.task_bank.dim
+                device = next(self.net.parameters()).device
+                self.net.task_bank.codes[task_id] = nn.Parameter(
+                    torch.zeros(latent_dim, device=device)
+                )
+            self.net.active_task_id = task_id
 
         self.vae_latent_dim = int(vae_latent_dim)
         self.factor_rank = int(factor_rank)
-        self.n_colors_no_black = self.n_vocab - 2
+        self.n_colors_no_black = self.local_n_colors
+
+        if self.global_non_black_count <= 0:
+            raise ValueError("Global vocabulary must contain at least one non-black color.")
 
         if self.n_colors_no_black <= 0:
             raise ValueError(
@@ -96,13 +139,13 @@ class ARCCompressor:
         self.film_head = nn.Linear(self.vae_latent_dim, 2 * self.n_vocab)
         self.palette_head = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(self.vae_latent_dim, self.n_colors_no_black),
+            nn.Linear(self.vae_latent_dim, self.global_non_black_count),
         )
 
         # Low-rank spatial factor heads
         self.proj_x = nn.Linear(self.n_vocab, self.factor_rank)
         self.proj_y = nn.Linear(self.n_vocab, self.factor_rank)
-        self.proj_c = nn.Linear(self.n_vocab, self.n_colors_no_black * self.factor_rank)
+        self.proj_c = nn.Linear(self.n_vocab, self.global_non_black_count * self.factor_rank)
 
         # Make optimizer creation code in train/solve_task happy
         self.weights_list = (
@@ -125,7 +168,7 @@ class ARCCompressor:
     def _build_input_tokens(self):
         """
         Returns x_in: [B,H,W] with pad=0 outside example bounds,
-        and tokens 1.. for in-bounds colors (index within task.colors, not raw ARC color id).
+        and tokens 1.. for in-bounds colors using the canonical ARC palette ordering.
         """
         prob = self.task.problem           # [B,H,W,2] ints in 0..n_colors (index within task.colors)
         masks = self.task.masks            # [B,H,W,2] float {0,1}
@@ -134,8 +177,11 @@ class ARCCompressor:
         inp_idx = prob[:, :, :, 0].long()              # [B,H,W]  (input grids)
         inb      = (masks[:, :, :, 0] > 0.5)           # [B,H,W]  in-bounds mask
 
+        colors_tensor = torch.as_tensor(self.local_colors, device=prob.device)
+        color_vals = colors_tensor[inp_idx]
+
         tokens = torch.zeros((B, H, W), dtype=torch.long, device=prob.device)
-        tokens = torch.where(inb, inp_idx + 1, tokens) # pad=0, black -> token=1, etc.
+        tokens = torch.where(inb, color_vals + 1, tokens)  # pad=0, ARC color -> token = color+1
         return tokens
 
     def _fixed_masks(self, device, dtype):
@@ -172,7 +218,7 @@ class ARCCompressor:
 
         feats = logits_bhwc.permute(0, 3, 1, 2)            # [B,Cv,H,W], Cv == n_vocab
         B, Cv, H, W = feats.shape
-        C_nb = self.n_colors_no_black
+        C_nb_global = self.global_non_black_count
 
         # Global posterior and FiLM conditioning
         pooled = feats.mean(dim=(2, 3))                    # [B,Cv]
@@ -196,23 +242,32 @@ class ARCCompressor:
 
         zx = self.proj_x(Hx).view(B, H, self.factor_rank)
         zy = self.proj_y(Wy).view(B, W, self.factor_rank)
-        zc = self.proj_c(Cx).view(B, C_nb, self.factor_rank)
+        zc = self.proj_c(Cx).view(B, C_nb_global, self.factor_rank)
 
         zx = torch.tanh(zx)
         zy = torch.tanh(zy)
         zc = torch.tanh(zc)
 
-        out_logits = torch.einsum('bhr,bwr,bcr->bchw', zx, zy, zc)
-        palette_bias = self.palette_head(z_g).view(B, C_nb, 1, 1)
-        out_logits = out_logits + palette_bias
+        out_logits_global = torch.einsum('bhr,bwr,bcr->bchw', zx, zy, zc)
+        palette_bias = self.palette_head(z_g).view(B, C_nb_global, 1, 1)
+        out_logits_global = out_logits_global + palette_bias
+
+        if self.n_colors_no_black > 0:
+            local_indices = self.local_channel_indices.to(out_logits_global.device)
+            out_logits = out_logits_global.index_select(1, local_indices)
+        else:
+            out_logits = out_logits_global.new_zeros(B, 0, H, W)
 
         # Channel 0 (input) needs something; give a confident one-hot of the input colors.
         # Targets are indices in 0..n_colors; shift so 1.. maps to 0..C_nb-1; black (0) -> no channel.
         inp_idx = self.task.problem[:, :, :, 0].long()       # [B,H,W] in 0..n_colors
-        adj = torch.clamp(inp_idx - 1, min=0)                # 0->0 (we'll zero it below), others -> c-1
-        in_onehot = F.one_hot(adj, num_classes=C_nb).permute(0, 3, 1, 2).to(out_logits.dtype)
-        in_onehot = in_onehot * (inp_idx > 0).unsqueeze(1).to(out_logits.dtype)
-        inp_logits = in_onehot * 10.0                        # sharp but stable
+        if self.n_colors_no_black > 0:
+            adj = torch.clamp(inp_idx - 1, min=0)
+            in_onehot = F.one_hot(adj, num_classes=self.n_colors_no_black).permute(0, 3, 1, 2).to(out_logits.dtype)
+            in_onehot = in_onehot * (inp_idx > 0).unsqueeze(1).to(out_logits.dtype)
+            inp_logits = in_onehot * 10.0                    # sharp but stable
+        else:
+            inp_logits = out_logits.new_zeros(B, 0, H, W)
 
         # Stack in_out axis as last dim
         logits = torch.stack([inp_logits, out_logits], dim=-1)  # [B,C_nb,H,W,2]
