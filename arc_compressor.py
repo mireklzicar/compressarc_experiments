@@ -21,7 +21,27 @@ class ARCCompressor:
       - returns fixed masks and dummy KL arrays for logger compatibility
     """
 
-    def __init__(self, task, steps=16, units=128, kernel=3, neighborhood="moore", toroidal=False):
+    def __init__(
+        self,
+        task,
+        steps: int = 16,
+        units: int = 128,
+        kernel: int = 3,
+        neighborhood: str = "moore",
+        cell_type: str = "dcgru",
+        dropout_keep_prob: float = 1.0,
+        attn_heads: int = 8,
+        num_latents: int = 64,
+        mixer_type: str = "full",
+        mixer_every: int = 4,
+        mixer_heads: int = 8,
+        mixer_depth: int = 4,
+        mixer_pool_stride: int = 2,
+        toroidal: bool = False,
+        conditioning: str = "none",
+        force_input_plane: bool = False,
+        input_plane_index: int = 0,
+    ):
         self.task = task
         self.steps = int(steps)
 
@@ -36,14 +56,21 @@ class ARCCompressor:
             num_units=units,
             n_input=self.n_vocab,
             n_classes=self.n_vocab,
-            dropout_keep_prob=1.0,         # determinism
+            dropout_keep_prob=dropout_keep_prob,
             kernel_size=kernel,
             neighborhood=neighborhood,
-            cell_type="dcgru",
+            cell_type=cell_type,
+            attn_heads=attn_heads,
+            num_latents=num_latents,
             toroidal=toroidal,
-            conditioning="none",           # important: no support/controller
-            mixer_type="full",             # mild global mixing helps
-            mixer_every=4,
+            conditioning=conditioning,
+            mixer_type=mixer_type,
+            mixer_every=mixer_every,
+            mixer_heads=mixer_heads,
+            mixer_depth=mixer_depth,
+            mixer_pool_stride=mixer_pool_stride,
+            force_input_plane=force_input_plane,
+            input_plane_index=input_plane_index,
         )
 
         # Make optimizer creation code in train/solve_task happy
