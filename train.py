@@ -103,7 +103,10 @@ def take_step(task, model, optimizer, train_step, train_history_logger):
             logprob = torch.logsumexp(coefficient*logprobs, dim=(0,1))/coefficient  # Aggregate for all possible grid sizes
             reconstruction_error = reconstruction_error - logprob
 
-    loss = total_KL + 10*reconstruction_error
+    warmup = 400
+    beta_max = 0.01
+    beta = beta_max * min(1.0, train_step / warmup)
+    loss = beta * total_KL + 10 * reconstruction_error
     loss.backward()
     optimizer.step()
     optimizer.zero_grad()
