@@ -55,7 +55,7 @@ def solve_task(task_name, split, time_limit, n_train_iterations, gpu_id, memory_
 
         # Set up the training
         model = arc_compressor.ARCCompressor(task)
-        optimizer = torch.optim.Adam(model.weights_list, lr=0.01, betas=(0.5, 0.9))
+        optimizer = torch.optim.Adam(model.weights_list, lr=3e-4)  # betas default are fine
         train_history_logger = solution_selection.Logger(task)
         train_history_logger.solution_most_frequent = tuple(((0, 0), (0, 0)) for example_num in range(task.n_test))
         train_history_logger.solution_second_most_frequent = tuple(((0, 0), (0, 0)) for example_num in range(task.n_test))

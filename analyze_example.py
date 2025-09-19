@@ -49,7 +49,7 @@ if __name__ == "__main__":
     # Preprocess the task, set up the training
     task = preprocessing.preprocess_tasks(split, [task_name])[0]
     model = arc_compressor.ARCCompressor(task)
-    optimizer = torch.optim.Adam(model.weights_list, lr=0.01, betas=(0.5, 0.9))
+    optimizer = torch.optim.Adam(model.weights_list, lr=3e-4)  # betas default are fine
     train_history_logger = solution_selection.Logger(task)
     visualization.plot_problem(train_history_logger)
 

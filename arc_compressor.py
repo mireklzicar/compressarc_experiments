@@ -1,159 +1,132 @@
-import numpy as np
 import torch
+import torch.nn.functional as F
 
-import initializers
-import layers
+from compressarc.cellgru.cellgru import CellGRU
 
 
-np.random.seed(0)
-torch.manual_seed(0)
 torch.set_default_dtype(torch.float32)
 torch.set_default_device('cuda')
 
 
 class ARCCompressor:
     """
-    The main model class for the VAE Decoder in our solution to ARC.
+    CellGRU backbone shim that mimics the old ARCCompressor API so that
+    train.py / solve_task.py / solution_selection.py keep working.
+
+    It:
+      - builds per-example input tokens with pad=0 (OOB), colors shifted +1
+      - runs CellGRU for K recurrent steps
+      - returns logits shaped like the original model:
+        [example, color_no_black, x, y, in_out], where in_out=0(input),1(output)
+      - returns fixed masks and dummy KL arrays for logger compatibility
     """
 
-    # Define the channel dimensions that all the layers use
-    n_layers = 4
-    share_up_dim = 16
-    share_down_dim = 8
-    decoding_dim = 4
-    softmax_dim = 2
-    cummax_dim = 4
-    shift_dim = 4
-    nonlinear_dim = 16
+    def __init__(self, task, steps=16, units=128, kernel=3, neighborhood="moore", toroidal=False):
+        self.task = task
+        self.steps = int(steps)
 
-    # This function gives the channel dimension of the residual stream depending on
-    # which dimensions are present, for every tensor in the multitensor.
-    def channel_dim_fn(self, dims):
-        return 16 if dims[2] == 0 else 8
+        # Task-local vocabulary:
+        #   pad=0     (OOB canvas)
+        #   colors=[0..n_colors] shifted by +1 -> tokens 1..(n_colors+1)
+        # NOTE: task.n_colors excludes black; len(task.colors) == n_colors+1 (includes black=0)
+        self.n_vocab = len(task.colors) + 1  # + pad
 
-    def __init__(self, task):
-        """
-        Create a model that is tailored to the given task, and initialize all the weights.
-        The weights are symmetrized such that swapping the x and y dimension ordering should
-        make the output's dimension ordering also swapped, for the same weights. This may not
-        be exactly correct since symmetrizing all operations is difficult.
-        Args:
-            task (preprocessing.Task): The task which the model is to be made for solving.
-        """
-        self.multitensor_system = task.multitensor_system
-
-        # Initialize weights
-        initializer = initializers.Initializer(self.multitensor_system, self.channel_dim_fn)
-
-        self.multiposteriors = initializer.initialize_multiposterior(self.decoding_dim)
-        self.decode_weights = initializer.initialize_multilinear([self.decoding_dim, self.channel_dim_fn])
-        initializer.symmetrize_xy(self.decode_weights)
-        self.target_capacities = initializer.initialize_multizeros([self.decoding_dim])
-
-        self.share_up_weights = []
-        self.share_down_weights = []
-        self.softmax_weights = []
-        self.cummax_weights = []
-        self.shift_weights = []
-        self.direction_share_weights = []
-        self.nonlinear_weights = []
-
-        for layer_num in range(self.n_layers):
-            self.share_up_weights.append(initializer.initialize_multiresidual(self.share_up_dim, self.share_up_dim))
-            self.share_down_weights.append(initializer.initialize_multiresidual(self.share_down_dim, self.share_down_dim))
-            output_scaling_fn = lambda dims: self.softmax_dim * (2 ** (dims[1] + dims[2] + dims[3] + dims[4]) - 1)
-            self.softmax_weights.append(initializer.initialize_multiresidual(self.softmax_dim, output_scaling_fn))
-            self.cummax_weights.append(initializer.initialize_multiresidual(self.cummax_dim, self.cummax_dim))
-            self.shift_weights.append(initializer.initialize_multiresidual(self.shift_dim, self.shift_dim))
-            self.direction_share_weights.append(initializer.initialize_multidirection_share())
-            self.nonlinear_weights.append(initializer.initialize_multiresidual(self.nonlinear_dim, self.nonlinear_dim))
-
-        self.head_weights = initializer.initialize_head()
-        self.mask_weights = initializer.initialize_linear(
-            [1, 0, 0, 1, 0], [self.channel_dim_fn([1, 0, 0, 1, 0]), 2]
+        # A plain DCGRU2D model with no controller/prompt bells & whistles
+        self.net = CellGRU(
+            num_units=units,
+            n_input=self.n_vocab,
+            n_classes=self.n_vocab,
+            dropout_keep_prob=1.0,         # determinism
+            kernel_size=kernel,
+            neighborhood=neighborhood,
+            cell_type="dcgru",
+            toroidal=toroidal,
+            conditioning="none",           # important: no support/controller
+            mixer_type="full",             # mild global mixing helps
+            mixer_every=4,
         )
 
-        # Symmetrize weights so that their behavior is equivariant to swapping x and y dimension ordering
-        for weight_list in [
-            self.share_up_weights,
-            self.share_down_weights,
-            self.softmax_weights,
-            self.cummax_weights,
-            self.shift_weights,
-            self.nonlinear_weights,
-        ]:
-            for layer_num in range(self.n_layers):
-                initializer.symmetrize_xy(weight_list[layer_num])
+        # Make optimizer creation code in train/solve_task happy
+        self.weights_list = list(self.net.parameters())
 
-        for layer_num in range(self.n_layers):
-            initializer.symmetrize_direction_sharing(self.direction_share_weights[layer_num])
+        # Dummy attributes so analyze_example.py won't explode if imported
+        self.multiposteriors = {}
+        self.decode_weights = {}
+        self.target_capacities = {}
 
-        self.weights_list = initializer.weights_list
+    # --- helpers -------------------------------------------------------------
 
+    def _build_input_tokens(self):
+        """
+        Returns x_in: [B,H,W] with pad=0 outside example bounds,
+        and tokens 1.. for in-bounds colors (index within task.colors, not raw ARC color id).
+        """
+        prob = self.task.problem           # [B,H,W,2] ints in 0..n_colors (index within task.colors)
+        masks = self.task.masks            # [B,H,W,2] float {0,1}
+        B, H, W = prob.shape[0], self.task.n_x, self.task.n_y
+
+        inp_idx = prob[:, :, :, 0].long()              # [B,H,W]  (input grids)
+        inb      = (masks[:, :, :, 0] > 0.5)           # [B,H,W]  in-bounds mask
+
+        tokens = torch.zeros((B, H, W), dtype=torch.long, device=prob.device)
+        tokens = torch.where(inb, inp_idx + 1, tokens) # pad=0, black -> token=1, etc.
+        return tokens
+
+    def _fixed_masks(self, device, dtype):
+        """
+        Builds x_mask, y_mask shaped [B, H, 2], [B, W, 2] with 1.0 inside known sizes and 0 outside.
+        This plays nicely with CompressARC's crop scorer.
+        """
+        B, H, W = self.task.n_examples, self.task.n_x, self.task.n_y
+        x_mask = torch.zeros((B, H, 2), device=device, dtype=dtype)
+        y_mask = torch.zeros((B, W, 2), device=device, dtype=dtype)
+        for e in range(B):
+            H_in, W_in = self.task.shapes[e][0]
+            H_out, W_out = self.task.shapes[e][1]
+            x_mask[e, :H_in, 0] = 1.0; y_mask[e, :W_in, 0] = 1.0   # input side
+            x_mask[e, :H_out, 1] = 1.0; y_mask[e, :W_out, 1] = 1.0 # output side
+        return x_mask, y_mask
+
+    # --- the API expected by train.py ---------------------------------------
 
     def forward(self):
         """
-        Compute the forward pass of the VAE decoder. Start by using internally stored latents,
-        and process from there. Output an [example, color, x, y, channel] tensor for the colors,
-        and an [example, x, channel] and [example, y, channel] tensor for the masks.
         Returns:
-            Tensor: An [example, color, x, y, channel] tensor, where for every example,
-                    input/output (picked by channel dimension), and every pixel (picked
-                    by x and y dimensions), we have a vector full of logits for that
-                    pixel being each possible color.
-            Tensor: An [example, x, channel] tensor, where for every example, input/output
-                    (picked by channel dimension), and every x, we assign a score that
-                    contributes to the likelihood that that index of the x dimension is not
-                    masked out in the prediction.
-            Tensor: An [example, y, channel] tensor, used in the same way as above.
-            list[Tensor]: A list of tensors indicating the amount of KL contributed by each component
-                    tensor in the layers.decode_latents() step.
-            list[str]: A list of tensor names that correspond to each tensor in the aforementioned output.
+          logits   : [B, color_no_black, H, W, 2]
+          x_mask   : [B, H, 2]
+          y_mask   : [B, W, 2]
+          KL_amounts: list[Tensor] (dummy/regularizer)
+          KL_names  : list[str]
         """
-        # Decoding layer
-        x, KL_amounts, KL_names = layers.decode_latents(
-            self.target_capacities, self.decode_weights, self.multiposteriors
-        )
+        B, H, W = self.task.n_examples, self.task.n_x, self.task.n_y
 
-        for layer_num in range(self.n_layers):
-            # Multitensor communication layer
-            x = layers.share_up(x, self.share_up_weights[layer_num])
+        # Build tokens and run recurrent dynamics
+        x_in = self._build_input_tokens()                 # [B,H,W]
+        logits_bhwc, sat_loss = self.net(x_in, steps=self.steps)  # [B,H,W,n_vocab]
 
-            # Softmax layer
-            x = layers.softmax(x, self.softmax_weights[layer_num], pre_norm=True, post_norm=False, use_bias=False)
+        # Map to CompressARC shapes.
+        # Drop pad=0 and also drop black class (token=1). We keep COLOR_NO_BLACK channels
+        # because train.take_step() prepends the black channel itself.
+        logits_no_black = logits_bhwc[..., 2:]            # [B,H,W,C_nb], C_nb = n_colors (=len(colors)-1)
+        out_logits = logits_no_black.permute(0, 3, 1, 2)  # [B,C_nb,H,W]
 
-            # Directional layers
-            x = layers.cummax(
-                x, self.cummax_weights[layer_num], self.multitensor_system.task.masks,
-                pre_norm=False, post_norm=True, use_bias=False
-            )
-            x = layers.shift(
-                x, self.shift_weights[layer_num], self.multitensor_system.task.masks,
-                pre_norm=False, post_norm=True, use_bias=False
-            )
+        # Channel 0 (input) needs something; give a confident one-hot of the input colors.
+        # Targets are indices in 0..n_colors; shift so 1.. maps to 0..C_nb-1; black (0) -> no channel.
+        C_nb = out_logits.shape[1]
+        inp_idx = self.task.problem[:, :, :, 0].long()       # [B,H,W] in 0..n_colors
+        adj = torch.clamp(inp_idx - 1, min=0)                # 0->0 (we'll zero it below), others -> c-1
+        in_onehot = F.one_hot(adj, num_classes=C_nb).permute(0, 3, 1, 2).to(out_logits.dtype)
+        in_onehot = in_onehot * (inp_idx > 0).unsqueeze(1).to(out_logits.dtype)
+        inp_logits = in_onehot * 10.0                        # sharp but stable
 
-            # Directional communication layer
-            x = layers.direction_share(x, self.direction_share_weights[layer_num], pre_norm=True, use_bias=False)
+        # Stack in_out axis as last dim
+        logits = torch.stack([inp_logits, out_logits], dim=-1)  # [B,C_nb,H,W,2]
 
-            # Nonlinear layer
-            x = layers.nonlinear(x, self.nonlinear_weights[layer_num], pre_norm=True, post_norm=False, use_bias=False)
+        # Simple deterministic masks
+        x_mask, y_mask = self._fixed_masks(device=logits.device, dtype=logits.dtype)
 
-            # Multitensor communication layer
-            x = layers.share_down(x, self.share_down_weights[layer_num])
+        # Dummy KL for the logger (we can reuse saturation as a tiny reg term)
+        KL_amounts = [sat_loss.reshape(1)]
+        KL_names   = ["(0,0,0,0,0)"]
 
-            # Normalization layer
-            x = layers.normalize(x)
-
-        # Linear Heads
-        output = (
-            layers.affine(x[[1, 1, 0, 1, 1]], self.head_weights, use_bias=False)
-            + 100 * self.head_weights[1]
-        )
-        x_mask = layers.affine(x[[1, 0, 0, 1, 0]], self.mask_weights, use_bias=True)
-        y_mask = layers.affine(x[[1, 0, 0, 0, 1]], self.mask_weights, use_bias=True)
-
-        # Postprocessing
-        x_mask, y_mask = layers.postprocess_mask(self.multitensor_system.task, x_mask, y_mask)
-
-        return output, x_mask, y_mask, KL_amounts, KL_names
-
+        return logits, x_mask, y_mask, KL_amounts, KL_names
